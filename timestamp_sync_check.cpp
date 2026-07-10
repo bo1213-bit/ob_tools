@@ -66,6 +66,7 @@ public:
     std::string csvPath;
     int  histogramBins  = 10;
     bool histogramAll   = false;
+    int testRunCount     = 0;
 
     // ---- Step 1: Enumerate devices ----
     void enumerateDevices() {
