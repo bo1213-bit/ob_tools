@@ -123,6 +123,7 @@ public:
                       << (i == 0 ? "PRIMARY" : "SECONDARY")
                       << "  triggerOut=" << (i == 0 ? "true" : "false") << std::endl;
         }
+        
 
         // Verify
         std::cout << "\nVerify config:" << std::endl;
@@ -205,7 +206,8 @@ public:
             std::lock_guard<std::mutex> lock(mutexes_[i]);
             std::cout << "Device " << i << " frames collected: " << queues_[i].size() << std::endl;
             while (!queues_[i].empty()) {
-                allFrames_[i].push_back(queues_[i].front());
+                allFrames_[i].
+                push_back(queues_[i].front());
                 queues_[i].pop();
             }
         }

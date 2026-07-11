@@ -11,7 +11,11 @@ endif()
 find_package(OrbbecSDK REQUIRED)
 
 # ---- Tool 1: Timestamp Sync Check ----
-add_executable(timestamp_sync_check timestamp_sync_check.cpp)
+add_executable(timestamp_sync_check
+    main.cpp
+    data_collector.cpp
+    sync_analyzer.cpp
+)
 target_link_libraries(timestamp_sync_check ${OrbbecSDK_LIBRARIES} pthread)
 target_include_directories(timestamp_sync_check PRIVATE ${OrbbecSDK_INCLUDE_DIRS})
 
