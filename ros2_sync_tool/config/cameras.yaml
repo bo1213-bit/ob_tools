@@ -1,0 +1,29 @@
+# Camera configuration for multi_camera_sync.launch.py
+# Edit this file to match your hardware setup.
+
+# List of cameras to launch
+cameras:
+  - name: "camera_0"
+    serial_number: "XX001"
+    sync_mode: "primary"
+
+  - name: "camera_1"
+    serial_number: "XX002"
+    sync_mode: "secondary"
+
+# Shared stream configuration
+streams:
+  depth_width:  848
+  depth_height: 480
+  depth_fps:    30
+  depth_format: "Y16"
+  color_width:  848
+  color_height: 480
+  color_fps:    30
+  color_format: "YUYV"
+
+# Analysis node settings
+analyzer:
+  duration_sec:     30
+  hw_threshold_us:  500
+  csv_path:          ""    # Set to "result.csv" to export
