@@ -31,14 +31,15 @@
 
 ```
 ob_tools/
-├── CMakeLists.txt                  # 现有 C++ SDK 项目（不动）
+├── CMakeLists.txt                  # 现有 C++ SDK 项目（微调 include 路径）
 ├── src/
-│   ├── data_collector.cpp/h        # 现有 C++ SDK 采集（不动）
-│   ├── sync_analyzer.cpp/h         # 现有分析逻辑（不动）
-│   ├── frame_stamp.h               # 共享数据结构（不动）
-│   └── main.cpp                    # 现有 C++ SDK 入口（不动）
+│   ├── data_collector.cpp/h        # 现有 C++ SDK 采集（不变）
+│   ├── sync_analyzer.cpp/h         # 修改：调用 sync_analyzer_core
+│   ├── sync_analyzer_core.cpp/h    # 新增：提取的纯分析逻辑（双前端共享）
+│   ├── frame_stamp.h               # 共享数据结构（不变）
+│   └── main.cpp                    # 现有 C++ SDK 入口（不变）
 │
-└── ros2_sync_tool/                 # 新：ROS2 独立 package（完全自包含）
+└── ros2_sync_tool/                 # 新：ROS2 独立 package
     ├── package.xml
     ├── CMakeLists.txt
     ├── launch/
@@ -46,9 +47,7 @@ ob_tools/
     ├── config/
     │   └── cameras.yaml                   # 相机 SN 列表 + 流配置
     └── src/
-        ├── frame_stamp.h                  # 复制自 ../src/frame_stamp.h（独立副本）
-        ├── sync_analyzer_core.cpp/h       # 新建：纯分析逻辑（不依赖 ob::Device）
-        └── ros2_sync_analyzer_node.cpp    # ROS2 分析节点
+        └── ros2_sync_analyzer_node.cpp    # ROS2 分析节点（订阅话题、调用 core）
 ```
 
 ---
@@ -172,16 +171,14 @@ Launch 文件遍历 `cameras` 列表，为每台相机启动一个 `orbbec_camer
 
 ---
 
-## 6. 分析逻辑复用
+## 6. 共享分析逻辑提取
 
-### 6.1 策略：独立副本，不改原代码
+### 6.1 sync_analyzer_core
 
-不修改现有 `src/sync_analyzer.cpp/h`。ROS2 package 内部新建 `sync_analyzer_core.cpp/h`，从现有 `sync_analyzer.cpp` **提取**纯计算逻辑（`matchAndDiff`、`computeStats`、`printReport`、`exportCSV`），去掉 `ob::Device` 依赖。两个文件独立存在，互不干扰。
-
-### 6.2 sync_analyzer_core
+从现有 `sync_analyzer.cpp` 提取纯计算逻辑，不依赖任何 SDK：
 
 ```cpp
-// sync_analyzer_core.h — 纯数据计算，不依赖任何 SDK
+// sync_analyzer_core.h
 class SyncAnalyzerCore {
 public:
     struct Config {
@@ -193,6 +190,7 @@ public:
     void run(const std::vector<std::vector<std::vector<FrameStamp>>>& frames,
              const Config& cfg);
 
+    // 与现有 SyncAnalyzer 接口完全一致
     const std::vector<PairStats>& getCrossStreamStats() const;
     const std::vector<PairStats>& getCrossDeviceDepthStats() const;
     const std::vector<PairStats>& getCrossDeviceColorStats() const;
@@ -200,6 +198,7 @@ public:
     void exportCSV(const std::string& path) const;
 
 private:
+    // 从现有 sync_analyzer.cpp 搬过来的方法
     static std::pair<std::vector<int64_t>, std::vector<int64_t>>
     matchAndDiff(const std::vector<FrameStamp>& a,
                  const std::vector<FrameStamp>& b,
@@ -210,6 +209,7 @@ private:
                                   const std::vector<int64_t>& hwDiffs,
                                   const std::vector<int64_t>& sysDiffs);
 
+    // 成员变量（从现有 SyncAnalyzer 搬过来）
     std::vector<PairStats> crossStreamStats_;
     std::vector<PairStats> crossDeviceDepthStats_;
     std::vector<PairStats> crossDeviceColorStats_;
@@ -217,7 +217,24 @@ private:
 };
 ```
 
-`sync_analyzer_core.cpp` 的实现从现有 `sync_analyzer.cpp` 搬过来，类名和命名空间调整即可，核心算法一模一样。
+### 6.2 现有 SyncAnalyzer 适配
+
+`sync_analyzer.cpp` 改为调用 `sync_analyzer_core`：
+
+```cpp
+void SyncAnalyzer::run(...) {
+    SyncAnalyzerCore core;
+    SyncAnalyzerCore::Config coreCfg;
+    coreCfg.hwThresholdUs = cfg.hwThresholdUs;
+    core.run(frames, coreCfg);
+    // 拷贝结果到自己的成员变量
+    crossStreamStats_      = core.getCrossStreamStats();
+    crossDeviceDepthStats_ = core.getCrossDeviceDepthStats();
+    crossDeviceColorStats_ = core.getCrossDeviceColorStats();
+}
+```
+
+这样 C++ SDK 工具和 ROS2 工具共享同一套分析逻辑。
 
 ---
 
@@ -267,6 +284,7 @@ add_library(sync_analyzer_core
 )
 target_include_directories(sync_analyzer_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src   # 引用 frame_stamp.h
 )
 
 # ROS2 分析节点
@@ -277,6 +295,7 @@ target_link_libraries(sync_analyzer_node sync_analyzer_core)
 ament_target_dependencies(sync_analyzer_node rclcpp sensor_msgs)
 target_include_directories(sync_analyzer_node PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
 )
 
 install(TARGETS sync_analyzer_node sync_analyzer_core
@@ -289,9 +308,28 @@ install(DIRECTORY launch config
 ament_package()
 ```
 
-### 8.2 现有 CMakeLists.txt
+### 8.2 现有 CMakeLists.txt 修改
 
-**不动。** 现有 C++ SDK 项目保持不变，ROS2 package 独立构建，两个项目完全解耦。
+`sync_analyzer_core` 放在 `src/` 目录下，与 `frame_stamp.h` 同级。现有 CMakeLists.txt 只需添加一个 include 路径：
+
+```cmake
+target_include_directories(timestamp_sync_check PRIVATE
+    ${OrbbecSDK_INCLUDE_DIRS}
+    src
+)
+```
+
+如果 C++ SDK 工具想复用 `sync_analyzer_core` 作为库：
+
+```cmake
+target_link_libraries(timestamp_sync_check
+    ${OrbbecSDK_LIBRARIES}
+    pthread
+    # 如果需要链接：../build/ros2_sync_tool/libsync_analyzer_core.a
+)
+```
+
+但推荐方式：C++ SDK 工具直接 `#include "sync_analyzer_core.h"` 编译链接（编译单元内联），不依赖 ROS2 package 的构建产物。这样两个项目完全解耦。
 
 ---
 
@@ -337,9 +375,9 @@ ament_package()
 | `ros2_sync_tool/CMakeLists.txt` | 新建 | ROS2 构建脚本 |
 | `ros2_sync_tool/launch/multi_camera_sync.launch.py` | 新建 | Launch 文件 |
 | `ros2_sync_tool/config/cameras.yaml` | 新建 | 相机配置 |
-| `ros2_sync_tool/src/frame_stamp.h` | 新建 | 复制自 `src/frame_stamp.h`（独立副本） |
-| `ros2_sync_tool/src/sync_analyzer_core.h` | 新建 | 分析逻辑头文件（不依赖 SDK） |
-| `ros2_sync_tool/src/sync_analyzer_core.cpp` | 新建 | 分析逻辑实现 |
+| `ros2_sync_tool/src/sync_analyzer_core.h` | 新建 | 提取的分析逻辑头文件 |
+| `ros2_sync_tool/src/sync_analyzer_core.cpp` | 新建 | 提取的分析逻辑实现 |
 | `ros2_sync_tool/src/ros2_sync_analyzer_node.cpp` | 新建 | ROS2 分析节点 |
-| `src/*` | **不动** | 现有 C++ SDK 代码全部保持不变 |
-| `CMakeLists.txt` | **不动** | 现有构建脚本不变 |
+| `src/sync_analyzer.h` | 修改 | 改为调用 sync_analyzer_core |
+| `src/sync_analyzer.cpp` | 修改 | 改为调用 sync_analyzer_core |
+| `CMakeLists.txt` | 修改 | 添加 sync_analyzer_core 的 include 路径 |

@@ -9,10 +9,11 @@
 ## 架构
 
 ```
-main.cpp                入口：解析参数 → 采集 → 分析 → 输出
-├── data_collector.cpp  模块1：枚举设备、配置硬同步、采集双流帧数据
-├── sync_analyzer.cpp   模块2：帧配对、三类对比、统计、CSV 导出
-└── visualize_sync.py   模块3：读取 CSV 生成箱型图 + HTML 汇总报告
+src/
+├── main.cpp                入口：解析参数 → 采集 → 分析 → 输出
+├── data_collector.cpp      模块1：枚举设备、配置硬同步、采集双流帧数据
+├── sync_analyzer.cpp       模块2：帧配对、三类对比、统计、CSV 导出
+└── visualize_sync.py       模块3：读取 CSV 生成箱型图 + HTML 汇总报告
 ```
 
 ## 编译
@@ -59,7 +60,7 @@ echo 512 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb
 pip install numpy matplotlib
 
 # 生成图表
-python visualize_sync.py result.csv --output ./charts
+python src/visualize_sync.py result.csv --output ./charts
 # 浏览器打开 charts/summary.html
 ```
 
@@ -157,7 +158,7 @@ cd build && cmake .. && make -j$(nproc)
 
 # 5. 生成可视化报告
 mkdir -p charts
-python visualize_sync.py result_30fps.csv --output charts/30fps
-python visualize_sync.py result_15fps.csv --output charts/15fps
-python visualize_sync.py result_5fps.csv --output charts/5fps
+python src/visualize_sync.py result_30fps.csv --output charts/30fps
+python src/visualize_sync.py result_15fps.csv --output charts/15fps
+python src/visualize_sync.py result_5fps.csv --output charts/5fps
 ```
