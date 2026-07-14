@@ -11,13 +11,9 @@ endif()
 find_package(OrbbecSDK REQUIRED)
 
 # ---- Tool 1: Timestamp Sync Check ----
-add_executable(timestamp_sync_check
-    src/main.cpp
-    src/data_collector.cpp
-    src/sync_analyzer.cpp
-)
+add_executable(timestamp_sync_check timestamp_sync_check.cpp)
 target_link_libraries(timestamp_sync_check ${OrbbecSDK_LIBRARIES} pthread)
-target_include_directories(timestamp_sync_check PRIVATE ${OrbbecSDK_INCLUDE_DIRS} src)
+target_include_directories(timestamp_sync_check PRIVATE ${OrbbecSDK_INCLUDE_DIRS})
 
 # ---- Tool 2: FPS Quality Test ----
 add_executable(fps_quality_test fps_quality_test.cpp)
