@@ -1,29 +1,28 @@
-# Camera configuration for multi_camera_sync.launch.py
-# Edit this file to match your hardware setup.
+# 同步分析器配置
+# ---------------------------
+# 此文件由 sync_analyzer.launch.py 读取。
+#
+# 重要：camera_names 必须与官方 launch 文件中的 camera_name 保持一致
+# （如 multi_gmsl_camera_synced.launch.py）。
 
-# List of cameras to launch
-cameras:
-  - name: "camera_0"
-    serial_number: "XX001"
-    sync_mode: "primary"
-
-  - name: "camera_1"
-    serial_number: "XX002"
-    sync_mode: "secondary"
-
-# Shared stream configuration
-streams:
-  depth_width:  848
-  depth_height: 480
-  depth_fps:    30
-  depth_format: "Y16"
-  color_width:  848
-  color_height: 480
-  color_fps:    30
-  color_format: "YUYV"
-
-# Analysis node settings
 analyzer:
-  duration_sec:     30
-  hw_threshold_us:  500
-  csv_path:          ""    # Set to "result.csv" to export
+  # 相机名称 — 必须与官方 launch 文件一致
+  camera_names:
+    - "camera_01"
+    - "camera_02"
+
+  # 订阅的流类型（depth, color）
+  # Topic 模式: /<camera_name>/<stream_type>/image_raw
+  stream_types:
+    - "depth"
+    - "color"
+
+  # 采集时长（秒）
+  duration_sec: 30
+
+  # 硬件时间戳匹配阈值（微秒）
+  # 两帧硬件时间戳差值 < 此阈值视为匹配
+  hw_threshold_us: 500
+
+  # CSV 导出路径，留空则不导出
+  csv_path: ""

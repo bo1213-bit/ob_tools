@@ -85,10 +85,11 @@ private:
                        int cameraIndex, int streamIndex) {
         FrameStamp fs;
 
-        // Extract timestamp from header.stamp
+        // Hardware/global timestamp from header.stamp
         fs.hwTimestampUs  = static_cast<int64_t>(msg->header.stamp.sec) * 1000000LL
                           + static_cast<int64_t>(msg->header.stamp.nanosec) / 1000LL;
-        fs.sysTimestampUs = fs.hwTimestampUs;  // Same source for now
+        // System arrival time from ROS callback
+        fs.sysTimestampUs = static_cast<int64_t>(this->now().nanoseconds()) / 1000LL;
         fs.frameNumber    = 0;                  // Will be index in the vector
         fs.deviceIndex    = cameraIndex;
 
