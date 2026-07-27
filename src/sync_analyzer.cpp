@@ -9,16 +9,16 @@
 #include <iomanip>
 #include <iostream>
 
-std::pair<std::vector<int64_t>, std::vector<int64_t>>
+std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
 SyncAnalyzer::matchAndDiff(
     const std::vector<FrameStamp>& a,
     const std::vector<FrameStamp>& b,
     int64_t hwThresholdUs)
 {
-    std::vector<int64_t> hwDiffs, sysDiffs;
+    std::vector<int64_t> hwDiffs, sysDiffs, timestamps;
 
     if (a.empty() || b.empty()) {
-        return {hwDiffs, sysDiffs};
+        return {hwDiffs, sysDiffs, timestamps};
     }
 
     for (size_t mi = 0; mi < a.size(); mi++) {
@@ -36,10 +36,11 @@ SyncAnalyzer::matchAndDiff(
         if (bestDist < hwThresholdUs) {
             hwDiffs.push_back(a[mi].hwTimestampUs - b[bestIdx].hwTimestampUs);
             sysDiffs.push_back(a[mi].sysTimestampUs - b[bestIdx].sysTimestampUs);
+            timestamps.push_back(a[mi].sysTimestampUs);  // reference frame's system timestamp
         }
     }
 
-    return {hwDiffs, sysDiffs};
+    return {hwDiffs, sysDiffs, timestamps};
 }
 
 SyncAnalyzer::PairStats
@@ -95,14 +96,17 @@ void SyncAnalyzer::run(
     for (int i = 0; i < deviceCount; i++) {
         if (frames[i][DEPTH_IDX].empty() || frames[i][COLOR_IDX].empty()) continue;
 
-        auto [hwDiffs, sysDiffs] = matchAndDiff(
+        auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
             frames[i][DEPTH_IDX], frames[i][COLOR_IDX], cfg.hwThresholdUs);
 
         auto stats = computeStats(i, i, StreamType::DEPTH, true, hwDiffs, sysDiffs);
         crossStreamStats_.push_back(stats);
 
         for (size_t k = 0; k < hwDiffs.size(); k++) {
-            allDiffs_.push_back({"cross_stream", i, i, "depth+color", hwDiffs[k], sysDiffs[k]});
+            // 计算 globalTimestampUs 差值
+            int64_t globalDiff = frames[i][DEPTH_IDX][k < frames[i][DEPTH_IDX].size() ? k : 0].globalTimestampUs
+                               - frames[i][COLOR_IDX][k < frames[i][COLOR_IDX].size() ? k : 0].globalTimestampUs;
+            allDiffs_.push_back({"cross_stream", i, i, "depth+color", hwDiffs[k], globalDiff, sysDiffs[k], timestamps[k]});
         }
     }
 
@@ -111,14 +115,14 @@ void SyncAnalyzer::run(
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][DEPTH_IDX].empty() || frames[j][DEPTH_IDX].empty()) continue;
 
-            auto [hwDiffs, sysDiffs] = matchAndDiff(
+            auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
                 frames[i][DEPTH_IDX], frames[j][DEPTH_IDX], cfg.hwThresholdUs);
 
             auto stats = computeStats(i, j, StreamType::DEPTH, false, hwDiffs, sysDiffs);
             crossDeviceDepthStats_.push_back(stats);
 
             for (size_t k = 0; k < hwDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], sysDiffs[k]});
+                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], 0, sysDiffs[k], timestamps[k]});
             }
         }
     }
@@ -128,14 +132,14 @@ void SyncAnalyzer::run(
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][COLOR_IDX].empty() || frames[j][COLOR_IDX].empty()) continue;
 
-            auto [hwDiffs, sysDiffs] = matchAndDiff(
+            auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
                 frames[i][COLOR_IDX], frames[j][COLOR_IDX], cfg.hwThresholdUs);
 
             auto stats = computeStats(i, j, StreamType::COLOR, false, hwDiffs, sysDiffs);
             crossDeviceColorStats_.push_back(stats);
 
             for (size_t k = 0; k < hwDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], sysDiffs[k]});
+                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], 0, sysDiffs[k], timestamps[k]});
             }
         }
     }
@@ -208,7 +212,7 @@ void SyncAnalyzer::exportCSV(const std::string& path) const {
         return;
     }
 
-    csvFile << "comparison_type,device_i,device_j,stream,hw_diff_us,sys_diff_us" << std::endl;
+    csvFile << "comparison_type,device_i,device_j,stream,hw_diff_us,global_diff_us,sys_diff_us,timestamp_us" << std::endl;
 
     for (auto& d : allDiffs_) {
         csvFile << d.comparisonType << ","
@@ -216,7 +220,9 @@ void SyncAnalyzer::exportCSV(const std::string& path) const {
                 << d.deviceJ << ","
                 << d.streamLabel << ","
                 << d.hwDiffUs << ","
-                << d.sysDiffUs << std::endl;
+                << d.globalDiffUs << ","
+                << d.sysDiffUs << ","
+                << d.timestampUs << std::endl;
     }
 
     csvFile.close();

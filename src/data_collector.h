@@ -13,12 +13,12 @@
 class DataCollector {
 public:
     struct Config {
-        int  durationSec = 30;
-        int  width       = 848;
-        int  height      = 480;
-        int  fps         = 30;
-        bool useDepth    = true;
-        bool useColor    = true;
+        int64_t  durationSec = 300;
+        int64_t  width       = 848;
+        int64_t  height      = 480;
+        int64_t  fps         = 30;
+        bool     useDepth    = true;
+        bool     useColor    = true;
     };
 
     // 执行完整采集流程: 枚举 → 配置同步 → 复位时钟 → 采集 → 停止
@@ -46,7 +46,7 @@ private:
     std::vector<std::shared_ptr<ob::Device>>               devices_;
     std::vector<std::shared_ptr<ob::Pipeline>>             pipelines_;
     // 回调中直接写入 allFrames_[deviceIndex][streamType]，加锁保护
-    std::vector<std::vector<std::mutex>>                   mutexes_;       // [deviceIndex][streamType]
+    std::vector<std::vector<std::shared_ptr<std::mutex>>>  mutexes_;       // [deviceIndex][streamType]
     // 最终结果: [deviceIndex][streamType][frameIndex]
     std::vector<std::vector<std::vector<FrameStamp>>>      allFrames_;
     // 采集运行标志，stop() 设为 false，collectFrames 中轮询检查

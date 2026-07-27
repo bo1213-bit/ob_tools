@@ -12,7 +12,7 @@ interleave_ae_mode: "laser"
 interleave_frame_enable: false
 interleave_skip_enable: false
 interleave_skip_index: 1
-time_domain: "global" # global, device, system
+time_domain: "device" # global, device, system
 enable_sync_host_time: true
 
 trigger_out_enabled: false
