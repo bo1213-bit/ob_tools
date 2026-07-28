@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-# visualize_sync.py
-# 模块3: 读取 CSV，生成时间戳同步精度图表
-#
-# Usage: python visualize_sync.py result.csv [--output ./charts]
+"""
+visualize_sync.py — HW timestamp sync precision histogram.
 
-import sys
+Generates a single three-in-one overview chart:
+  X-axis = sync precision time difference (hw_diff_us, signed)
+  Y-axis = frequency (count per bin)
+
+Bin width and tick spacing both fixed at 50 us.
+
+Usage: python visualize_sync.py <csv_path> [--output ./charts]
+"""
+
 import os
 import csv
 import argparse
@@ -14,205 +20,181 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+
+# ── Palette ────────────────────────────────────────────────────────────
+SLOT1_BLUE     = '#2a78d6'
+MEAN_COLOR     = '#1c5cab'
+MEDIAN_COLOR   = '#d95926'
+GRID_COLOR     = '#e1e0d9'
+AXIS_COLOR     = '#c3c2b7'
+TEXT_PRIMARY   = '#0b0b0b'
+TEXT_SECONDARY = '#52514e'
+BG_SURFACE     = '#fcfcfb'
+
+BIN_WIDTH_US = 50  # fixed bin width and tick step (us)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Visualize timestamp sync CSV')
-    parser.add_argument('csv', help='CSV file from SyncAnalyzer')
-    parser.add_argument('--output', '-o', default='./charts', help='Output directory (default: ./charts)')
+    parser = argparse.ArgumentParser(
+        description='Timestamp sync precision histogram')
+    parser.add_argument('csv', help='CSV file from timestamp_sync_check')
+    parser.add_argument('--output', '-o', default='./charts')
+    parser.add_argument('--name', '-n', default=None,
+                        help='Output filename (default: overview_combined.png)')
     return parser.parse_args()
 
 
-def read_csv(csv_path):
-    """
-    Reads CSV into:
-    {
-        'cross_stream': [{'device_i':0, 'hw_diff':-120, 'sys_diff':350}, ...],
-        'cross_device_depth': [...],
-        'cross_device_color': [...]
-    }
-    """
+def read_csv(csv_path: str) -> dict[str, list[float]]:
     data = defaultdict(list)
     with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            comparison = row['comparison_type']
-            stream = row['stream']
-            if comparison == 'cross_device':
-                key = f"cross_device_{stream}"
-            else:
-                key = 'cross_stream'
-
-            data[key].append({
-                'device_i': int(row['device_i']),
-                'device_j': int(row['device_j']),
-                'hw_diff': float(row['hw_diff_us']),
-                'sys_diff': float(row['sys_diff_us']),
-            })
-    return data
+        for row in csv.DictReader(f):
+            key = row['comparison_type']
+            if key == 'cross_device':
+                key = f"cross_device_{row['stream']}"
+            data[key].append(float(row['hw_diff_us']))
+    return dict(data)
 
 
-def compute_stats(values):
-    if not values:
-        return {'min': 0, 'max': 0, 'mean': 0, 'stddev': 0, 'count': 0}
-    arr = np.array(values)
+def fixed_bins(values: np.ndarray) -> np.ndarray:
+    """Bin edges at multiples of BIN_WIDTH_US covering full data range."""
+    vmin, vmax = float(values.min()), float(values.max())
+    bw = BIN_WIDTH_US
+    lo = np.floor(vmin / bw) * bw
+    hi = np.ceil(vmax / bw) * bw
+    return np.arange(lo, hi + bw, bw)
+
+
+def compute_stats(values: np.ndarray) -> dict:
+    mean = float(np.mean(values))
+    std = float(np.std(values, ddof=0))
+    median = float(np.median(values))
+    n = len(values)
+    if n > 2 and std > 0:
+        skew = (n / ((n - 1) * (n - 2))) * float(np.sum(((values - mean) / std) ** 3))
+    else:
+        skew = 0.0
+    pcts = np.percentile(np.abs(values), [50, 75, 90, 95, 99])
     return {
-        'min': np.min(arr),
-        'max': np.max(arr),
-        'mean': np.mean(arr),
-        'stddev': np.std(arr),
-        'count': len(arr),
+        'count': n, 'min': float(values.min()), 'max': float(values.max()),
+        'mean': mean, 'median': median, 'std': std, 'skew': skew,
+        'abs_p50': pcts[0], 'abs_p75': pcts[1], 'abs_p90': pcts[2],
+        'abs_p95': pcts[3], 'abs_p99': pcts[4],
     }
 
 
-def plot_comparison(grouped_data, key, title, output_path):
-    if key not in grouped_data or not grouped_data[key]:
-        print(f"  [SKIP] No data for '{key}'")
-        return
-
-    pairs = defaultdict(list)
-    for d in grouped_data[key]:
-        pairs[(d['device_i'], d['device_j'])].append(d)
-
-    n_pairs = len(pairs)
-    fig, axes = plt.subplots(1, n_pairs, figsize=(5 * n_pairs, 5), squeeze=False)
-    axes = axes[0]
-
-    for ax, ((di, dj), records) in zip(axes, pairs.items()):
-        hw_vals = [r['hw_diff'] for r in records]
-        sys_vals = [r['sys_diff'] for r in records]
-
-        bp = ax.boxplot([hw_vals, sys_vals], labels=['HW Diff', 'Sys Diff'],
-                        patch_artist=True, widths=0.5)
-        bp['boxes'][0].set_facecolor('#4ECDC4')
-        bp['boxes'][1].set_facecolor('#FF6B6B')
-
-        ax.set_title(f'Device {di} vs Device {dj}')
-        ax.set_ylabel('Diff (us)')
-        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-
-        hw_stats = compute_stats(hw_vals)
-        sys_stats = compute_stats(sys_vals)
-        ax.text(0.65, 0.95,
-                f"HW: mean={hw_stats['mean']:.1f} std={hw_stats['stddev']:.1f}\n"
-                f"Sys: mean={sys_stats['mean']:.1f} std={sys_stats['stddev']:.1f}",
-                transform=ax.transAxes, fontsize=7, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-    fig.suptitle(title, fontsize=14, fontweight='bold')
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    print(f"  Saved: {output_path}")
+def describe_skew(stats: dict) -> str:
+    s = stats['skew']
+    if abs(s) < 0.3:
+        return '≈ symmetric'
+    d = 'right' if s > 0 else 'left'
+    if abs(s) < 1:
+        return f'mildly {d} ({s:+.2f})'
+    return f'{d}-skewed ({s:+.2f})'
 
 
-def generate_html(data, output_dir):
-    sections = [
-        ('cross_stream', '1. Cross-Stream (Depth vs Color)', 'cross_stream_sync.png'),
-        ('cross_device_depth', '2. Cross-Device Depth', 'cross_device_depth.png'),
-        ('cross_device_color', '3. Cross-Device Color', 'cross_device_color.png'),
+def plot_combined_overview(all_data: dict[str, list[float]],
+                           output_dir: str, fname: str = 'overview_combined.png'):
+    groups = [
+        ('cross_device_depth',  'Cross-Device  Depth'),
+        ('cross_device_color',  'Cross-Device  Color'),
     ]
 
-    table_rows = ""
-    for key, title, img in sections:
-        if key not in data or not data[key]:
-            continue
-        pairs = defaultdict(list)
-        for d in data[key]:
-            pairs[(d['device_i'], d['device_j'])].append(d)
+    present = [(k, label) for k, label in groups
+               if k in all_data and len(all_data[k]) > 0]
+    if not present:
+        print("  [SKIP] Combined overview: no data")
+        return
 
-        for (di, dj), records in sorted(pairs.items()):
-            hw_vals = [r['hw_diff'] for r in records]
-            sys_vals = [r['sys_diff'] for r in records]
-            hw_s = compute_stats(hw_vals)
-            sys_s = compute_stats(sys_vals)
-            table_rows += f"""<tr>
-    <td>{title}</td>
-    <td>Device {di} vs {dj}</td>
-    <td>{hw_s['count']}</td>
-    <td>{hw_s['min']:.1f}</td><td>{hw_s['max']:.1f}</td><td>{hw_s['mean']:.1f}</td><td>{hw_s['stddev']:.1f}</td>
-    <td>{sys_s['min']:.1f}</td><td>{sys_s['max']:.1f}</td><td>{sys_s['mean']:.1f}</td><td>{sys_s['stddev']:.1f}</td>
-</tr>"""
+    n = len(present)
+    fig, axes = plt.subplots(n, 1, figsize=(12, 4.0 * n), sharex=False)
+    fig.patch.set_facecolor(BG_SURFACE)
+    if n == 1:
+        axes = [axes]
 
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Timestamp Sync Analysis Report</title>
-    <style>
-        body {{ font-family: -apple-system, 'Segoe UI', sans-serif; max-width: 1200px; margin: auto; padding: 20px; background: #fafafa; }}
-        h1 {{ color: #333; border-bottom: 2px solid #4ECDC4; padding-bottom: 10px; }}
-        h2 {{ color: #555; margin-top: 40px; }}
-        table {{ border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 13px; }}
-        th, td {{ border: 1px solid #ddd; padding: 6px 10px; text-align: right; }}
-        th {{ background: #4ECDC4; color: white; }}
-        td:first-child, td:nth-child(2) {{ text-align: left; }}
-        img {{ max-width: 100%; border: 1px solid #eee; border-radius: 4px; margin: 10px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
-    </style>
-</head>
-<body>
-<h1>Timestamp Sync Analysis Report</h1>
+    for ax, (key, label) in zip(axes, present):
+        values = np.array(all_data[key])
+        stats = compute_stats(values)
+        mean, median, std = stats['mean'], stats['median'], stats['std']
 
-<h2>Summary Statistics</h2>
-<table>
-    <tr>
-        <th>Comparison</th><th>Pair</th><th>Count</th>
-        <th colspan="4">HW Timestamp Diff (us)</th>
-        <th colspan="4">System Timestamp Diff (us)</th>
-    </tr>
-    <tr>
-        <th></th><th></th><th></th>
-        <th>Min</th><th>Max</th><th>Mean</th><th>Stddev</th>
-        <th>Min</th><th>Max</th><th>Mean</th><th>Stddev</th>
-    </tr>
-    {table_rows}
-</table>
+        bins = fixed_bins(values)
+        ax.set_facecolor(BG_SURFACE)
 
-<h2>Charts</h2>
-<h2>1. Cross-Stream (Depth vs Color)</h2>
-<img src="cross_stream_sync.png" alt="Cross-Stream Sync">
+        ax.hist(values, bins=bins,
+                color=SLOT1_BLUE, edgecolor='#1c5cab', linewidth=0.4,
+                alpha=0.85, zorder=3, rwidth=0.94)
 
-<h2>2. Cross-Device Depth</h2>
-<img src="cross_device_depth.png" alt="Cross-Device Depth">
+        # Mean / median lines
+        ax.axvline(mean, color=MEAN_COLOR, linewidth=1.8, linestyle='--',
+                   alpha=0.85, zorder=4, label=f'Mean = {mean:.1f} us')
+        ax.axvline(median, color=MEDIAN_COLOR, linewidth=1.8, linestyle=':',
+                   alpha=0.85, zorder=4, label=f'Median = {median:.1f} us')
 
-<h2>3. Cross-Device Color</h2>
-<img src="cross_device_color.png" alt="Cross-Device Color">
+        # ── Stats box ─────────────────────────────────────────────
+        lines = [
+            f'N = {stats["count"]:,}',
+            f'Mean = {mean:.2f} us',
+            f'Median = {median:.2f} us',
+            f'Std = {std:.2f} us',
+            f'Skewness: {describe_skew(stats)}',
+            f'Range: [{stats["min"]:.0f}, {stats["max"]:.0f}] us',
+            f'|diff|≤ 95%: {stats["abs_p95"]:.0f} us',
+            f'|diff|≤ 99%: {stats["abs_p99"]:.0f} us',
+        ]
+        stats_text = '\n'.join(lines)
 
-<p><em>Generated by visualize_sync.py</em></p>
-</body>
-</html>"""
+        x_pos = 0.02 if stats['skew'] <= 0 else 0.98
+        ha = 'left' if stats['skew'] <= 0 else 'right'
+        ax.text(x_pos, 0.97, stats_text, transform=ax.transAxes,
+                fontsize=8.5, fontfamily='monospace', va='top', ha=ha,
+                color=TEXT_PRIMARY,
+                bbox=dict(boxstyle='round,pad=0.55', facecolor='#f9f9f7',
+                           edgecolor='#d0cfc7', alpha=0.93, linewidth=0.7),
+                zorder=10)
 
-    html_path = os.path.join(output_dir, 'summary.html')
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html)
-    print(f"  Saved: {html_path}")
+        # ── Axis styling ──────────────────────────────────────────
+        ax.set_title(label, fontsize=12, fontweight='bold',
+                     color=TEXT_PRIMARY, pad=10)
+        ax.set_xlabel('HW diff (us)', fontsize=10, color=TEXT_PRIMARY)
+        ax.set_ylabel('Frequency', fontsize=10, color=TEXT_PRIMARY)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:,.0f}'))
+
+        # Fixed 50 us bins; ticks auto-spaced to prevent label overlap
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True, steps=[1, 2, 5, 10]))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:.0f}'))
+
+        ax.grid(axis='y', color=GRID_COLOR, linewidth=0.8, alpha=0.7, zorder=0)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color(AXIS_COLOR)
+        ax.spines['bottom'].set_color(AXIS_COLOR)
+        ax.tick_params(colors=TEXT_SECONDARY, labelsize=8.5)
+
+        # Legend
+        legend = ax.legend(fontsize=9, framealpha=0.85,
+                           edgecolor='#d0cfc7', facecolor='#fcfcfb')
+        legend.set_zorder(11)
+
+    fig.tight_layout(pad=2.0)
+    out_path = os.path.join(output_dir, fname)
+    fig.savefig(out_path, dpi=150, facecolor=BG_SURFACE, edgecolor='none')
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
 
 
 def main():
     args = parse_args()
     os.makedirs(args.output, exist_ok=True)
 
-    print(f"Reading CSV: {args.csv}")
+    print(f"Reading: {args.csv}")
     data = read_csv(args.csv)
-    print(f"  cross_stream: {len(data.get('cross_stream', []))} records")
-    print(f"  cross_device_depth: {len(data.get('cross_device_depth', []))} records")
-    print(f"  cross_device_color: {len(data.get('cross_device_color', []))} records")
+    for k, v in data.items():
+        print(f"  {k}: {len(v):,} records")
 
-    print("\nGenerating charts...")
-    plot_comparison(data, 'cross_stream',
-                    'Cross-Stream Sync (Depth vs Color)',
-                    os.path.join(args.output, 'cross_stream_sync.png'))
-    plot_comparison(data, 'cross_device_depth',
-                    'Cross-Device Sync (Depth)',
-                    os.path.join(args.output, 'cross_device_depth.png'))
-    plot_comparison(data, 'cross_device_color',
-                    'Cross-Device Sync (Color)',
-                    os.path.join(args.output, 'cross_device_color.png'))
-
-    print("\nGenerating HTML report...")
-    generate_html(data, args.output)
-
-    print(f"\nReport generated: {args.output}/summary.html")
+    fname = args.name if args.name else 'overview_combined.png'
+    plot_combined_overview(data, args.output, fname)
+    print(f"\nDone: {args.output}/")
 
 
 if __name__ == '__main__':

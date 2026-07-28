@@ -67,26 +67,37 @@ void DataCollector::enumerateDevices() {
 
 void DataCollector::configureSyncMode() {
     for (size_t i = 0; i < devices_.size(); i++) {
+        auto info = devices_[i]->getDeviceInfo();
+        std::string connType = info->connectionType() ? info->connectionType() : "USB";
+
         OBMultiDeviceSyncConfig cfg = devices_[i]->getMultiDeviceSyncConfig();
-        if (i == 0) {
-            cfg.syncMode             = OB_MULTI_DEVICE_SYNC_MODE_PRIMARY;
-            cfg.triggerOutEnable     = true;
-            cfg.triggerOutDelayUs    = 0;
+        if (connType == "GMSL2") {
+            // GMSL: 所有相机设为 HARDWARE_TRIGGERING，触发来自外部硬件信号
+            // 和 MultiDeviceSync 一致
+            cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING;
+            cfg.triggerOutEnable = false;
         } else {
-            cfg.syncMode             = OB_MULTI_DEVICE_SYNC_MODE_SECONDARY;
-            cfg.triggerOutEnable     = false;
-            cfg.triggerOutDelayUs    = 0;
+            // USB: Primary/Secondary mode
+            if (i == 0) {
+                cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_PRIMARY;
+                cfg.triggerOutEnable = true;
+            } else {
+                cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_SECONDARY;
+                cfg.triggerOutEnable = false;
+            }
         }
         cfg.depthDelayUs         = 0;
         cfg.colorDelayUs         = 0;
         cfg.trigger2ImageDelayUs = 0;
+        cfg.triggerOutDelayUs    = 0;
         cfg.framesPerTrigger     = 1;
         devices_[i]->setMultiDeviceSyncConfig(cfg);
 
-        auto sn = devices_[i]->getDeviceInfo()->serialNumber();
-        std::cout << "Device " << i << " (SN=" << sn << "): "
-                  << (i == 0 ? "PRIMARY" : "SECONDARY")
-                  << "  triggerOut=" << (i == 0 ? "true" : "false") << std::endl;
+        auto sn = info->serialNumber();
+        std::cout << "Device " << i << " (SN=" << sn
+                  << "  type=" << connType << "): "
+                  << (connType == "GMSL2" ? "HARDWARE_TRIGGERING" : (i == 0 ? "PRIMARY" : "SECONDARY"))
+                  << "  triggerOut=" << (cfg.triggerOutEnable ? "true" : "false") << std::endl;
     }
 
     std::cout << "\nVerify config:" << std::endl;
@@ -98,13 +109,30 @@ void DataCollector::configureSyncMode() {
 }
 
 void DataCollector::resetTimestampAndSyncClock() {
-    devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_TRIGGER_OUT_ENABLE_BOOL, true);
-    devices_[0]->setIntProperty(OB_PROP_TIMER_RESET_DELAY_US_INT, 20);
-    devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_SIGNAL_BOOL, true);
-    std::cout << "\nTimestamp reset sent (primary -> all secondaries, delay=20us)" << std::endl;
+    // 检查是否 GMSL 模式
+    bool isGmsl = false;
+    if (!devices_.empty()) {
+        auto info = devices_[0]->getDeviceInfo();
+        std::string connType = info->connectionType() ? info->connectionType() : "USB";
+        isGmsl = (connType == "GMSL2");
+    }
 
-    context_->enableDeviceClockSync(100);
-    std::cout << "Device clock sync enabled (every 100ms)" << std::endl;
+    if (isGmsl) {
+        // GMSL: 触发来自外部硬件信号，跳过时间戳复位
+        // 和 MultiDeviceSync 一致
+        std::cout << "\nGMSL mode: skip timestamp reset (use external HW trigger)."
+                  << std::endl;
+    } else {
+        // USB: PRIMARY 发送时间戳复位信号给所有 SECONDARY
+        devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_TRIGGER_OUT_ENABLE_BOOL, true);
+        devices_[0]->setIntProperty(OB_PROP_TIMER_RESET_DELAY_US_INT, 20);
+        devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_SIGNAL_BOOL, true);
+        std::cout << "\nTimestamp reset sent (primary -> all secondaries, delay=20us)" << std::endl;
+    }
+
+    // 和 MultiDeviceSync 一致：每 60 秒同步一次
+    context_->enableDeviceClockSync(60000);
+    std::cout << "Device clock sync enabled (every 60s)" << std::endl;
 }
 
 void DataCollector::collectFrames(const Config& cfg) {
@@ -116,6 +144,9 @@ void DataCollector::collectFrames(const Config& cfg) {
     for (int i = 0; i < deviceCount; i++) {
         allFrames_[i].resize(2);
         mutexes_[i].resize(2);
+        for (int j = 0; j < 2; j++) {
+            mutexes_[i][j] = std::make_shared<std::mutex>();
+        }
     }
 
     for (int i = 0; i < deviceCount; i++) {
@@ -123,9 +154,13 @@ void DataCollector::collectFrames(const Config& cfg) {
         auto streamCfg = std::make_shared<ob::Config>();
 
         if (cfg.useDepth)
-            streamCfg->enableVideoStream(OB_STREAM_DEPTH, cfg.width, cfg.height, cfg.fps, OB_FORMAT_Y16);
+            streamCfg->enableVideoStream(OB_STREAM_DEPTH,
+                static_cast<int>(cfg.width), static_cast<int>(cfg.height),
+                static_cast<int>(cfg.fps), OB_FORMAT_Y16);
         if (cfg.useColor)
-            streamCfg->enableVideoStream(OB_STREAM_COLOR, cfg.width, cfg.height, cfg.fps, OB_FORMAT_YUYV);
+            streamCfg->enableVideoStream(OB_STREAM_COLOR,
+                static_cast<int>(cfg.width), static_cast<int>(cfg.height),
+                static_cast<int>(cfg.fps), OB_FORMAT_YUYV);
 
         int camIndex = i;
         pipelines_[i]->start(streamCfg, [this, camIndex, cfg](std::shared_ptr<ob::FrameSet> frameSet) {
@@ -136,12 +171,13 @@ void DataCollector::collectFrames(const Config& cfg) {
                 auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
                 if (depthFrame) {
                     FrameStamp fs;
-                    fs.sysTimestampUs = nowUs;
-                    fs.hwTimestampUs  = depthFrame->getMetadataValue(OB_FRAME_METADATA_TYPE_TIMESTAMP);
-                    fs.frameNumber    = depthFrame->getMetadataValue(OB_FRAME_METADATA_TYPE_FRAME_NUMBER);
-                    fs.deviceIndex    = camIndex;
-                    fs.streamType     = StreamType::DEPTH;
-                    std::lock_guard<std::mutex> lock(mutexes_[camIndex][0]);
+                    fs.hwTimestampUs     = depthFrame->timeStampUs();
+                    fs.globalTimestampUs = depthFrame->globalTimeStampUs();
+                    fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
+                    fs.frameNumber       = 0; // 时间戳已包含足够信息
+                    fs.deviceIndex       = camIndex;
+                    fs.streamType        = StreamType::DEPTH;
+                    std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
                     allFrames_[camIndex][0].push_back(fs);
                 }
             }
@@ -150,12 +186,13 @@ void DataCollector::collectFrames(const Config& cfg) {
                 auto colorFrame = frameSet->getFrame(OB_FRAME_COLOR);
                 if (colorFrame) {
                     FrameStamp fs;
-                    fs.sysTimestampUs = nowUs;
-                    fs.hwTimestampUs  = colorFrame->getMetadataValue(OB_FRAME_METADATA_TYPE_TIMESTAMP);
-                    fs.frameNumber    = colorFrame->getMetadataValue(OB_FRAME_METADATA_TYPE_FRAME_NUMBER);
-                    fs.deviceIndex    = camIndex;
-                    fs.streamType     = StreamType::COLOR;
-                    std::lock_guard<std::mutex> lock(mutexes_[camIndex][1]);
+                    fs.hwTimestampUs     = colorFrame->timeStampUs();
+                    fs.globalTimestampUs = colorFrame->globalTimeStampUs();
+                    fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
+                    fs.frameNumber       = 0;
+                    fs.deviceIndex       = camIndex;
+                    fs.streamType        = StreamType::COLOR;
+                    std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
                     allFrames_[camIndex][1].push_back(fs);
                 }
             }

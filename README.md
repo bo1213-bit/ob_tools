@@ -6,6 +6,12 @@
 - **跨设备同流 Depth**：Device[i].Depth vs Device[j].Depth
 - **跨设备同流 Color**：Device[i].Color vs Device[j].Color
 
+提供两种使用方式：C++ SDK 直接调用版本，以及 ROS2 订阅 topic 版本。
+
+---
+
+# C++ SDK 使用说明
+
 ## 架构
 
 ```
@@ -162,3 +168,81 @@ python src/visualize_sync.py result_30fps.csv --output charts/30fps
 python src/visualize_sync.py result_15fps.csv --output charts/15fps
 python src/visualize_sync.py result_5fps.csv --output charts/5fps
 ```
+
+---
+
+# ROS2 SDK 使用说明
+
+基于 OrbbecSDK ROS2 的多相机时间戳同步分析工具，通过订阅 topic 方式采集帧时间戳并分析。代码位于 `ros2_sync_tool/` 目录。
+
+## 与 C++ 版本的差异
+
+| | C++ SDK 版本 | ROS2 SDK 版本 |
+|---|---|---|
+| 采集方式 | 直接调用 Orbbec SDK | 订阅 ROS2 image topic |
+| 相机启动 | 工具内部启动相机 | 官方 launch 文件单独启动 |
+| 配置方式 | 命令行参数 | YAML 配置文件 |
+| 可视化 | Python 脚本 (visualize_sync.py) | CSV 导出后复用 Python 脚本 |
+| 分析逻辑 | 相同（三组对比） | 相同（三组对比） |
+
+## 编译
+
+将 `ros2_sync_tool/` 放入 ROS2 workspace 的 `src/` 目录：
+
+```bash
+cd ~/ros2_ws
+colcon build --packages-select ros2_sync_tool
+source install/setup.bash
+```
+
+## 使用
+
+```bash
+# 终端1：用官方 launch 启动相机
+ros2 launch orbbec_camera multi_gmsl_camera_synced.launch.py
+
+# 终端2：编辑 ros2_sync_tool/config/cameras.yaml 填入 camera_names，启动分析
+ros2 launch ros2_sync_tool sync_analyzer.launch.py
+```
+
+## 配置说明
+
+编辑 `ros2_sync_tool/config/cameras.yaml`：
+
+```yaml
+analyzer:
+  camera_names:          # 必须与官方 launch 中的 camera_name 一致
+    - "camera_01"
+    - "camera_02"
+  stream_types:          # depth, color
+    - "depth"
+    - "color"
+  duration_sec: 30       # 采集时长（秒）
+  hw_threshold_us: 500   # 硬件时间戳匹配阈值（微秒）
+  csv_path: ""           # 设为 "result.csv" 导出 CSV
+```
+
+## 时间戳来源
+
+| 时间戳 | 来源 | 含义 |
+|------|------|------|
+| HW Timestamp | `header.stamp`（`time_domain="global"`） | `frame->getGlobalTimeStampUs()`，多设备同步后的全局硬件时间戳 |
+| System Timestamp | `this->now()` | ROS 节点收到消息的时刻，反映传输延迟 |
+
+## 输出示例
+
+```
+==============================================
+  Timestamp Sync Analysis Report
+==============================================
+--- 1. Cross-Stream (Depth vs Color) ---
+Device 0:
+  Pair count: 897
+  HW Timestamp Diff:
+    Min=-320us  Max=280us  Mean=15.2us  Stddev=85.3us
+  System Timestamp Diff:
+    Min=-1500us  Max=1200us  Mean=450.8us  Stddev=310.5us
+...
+```
+
+输出指标含义同上（C++ 版本）。

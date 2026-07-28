@@ -24,7 +24,7 @@ static void signalHandler(int /*signum*/) {
 static void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [OPTIONS]\n"
               << "Options:\n"
-              << "  --duration=N        Collection duration in seconds (default: 30)\n"
+              << "  --duration=N        Collection duration in seconds (default: 300)\n"
               << "  --fps=N             Stream frame rate (default: 30)\n"
               << "  --width=N           Stream width (default: 848)\n"
               << "  --height=N          Stream height (default: 480)\n"
@@ -36,7 +36,7 @@ static void printUsage(const char* prog) {
               << std::endl;
 }
 
-static bool parseArg(const std::string& arg, const std::string& prefix, int& out) {
+static bool parseArg(const std::string& arg, const std::string& prefix, int64_t& out) {
     if (arg.compare(0, prefix.size(), prefix) == 0) {
         out = std::atoi(arg.substr(prefix.size()).c_str());
         return true;

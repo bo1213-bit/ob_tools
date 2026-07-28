@@ -8,12 +8,13 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 class SyncAnalyzer {
 public:
     struct Config {
-        int64_t hwThresholdUs = 500;  // 硬件时间戳配对阈值 (us)
+        int64_t hwThresholdUs = 2000;  // 硬件时间戳配对阈值 (us)
     };
 
     struct PairStats {
@@ -50,8 +51,8 @@ public:
     void exportCSV(const std::string& path) const;
 
 private:
-    // 通用配对: 两组 FrameStamp → 硬件时间戳差 + 软件时间戳差
-    static std::pair<std::vector<int64_t>, std::vector<int64_t>>
+    // 通用配对: 两组 FrameStamp → 硬件时间戳差 + 软件时间戳差 + 参考帧时间戳
+    static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
     matchAndDiff(
         const std::vector<FrameStamp>& a,
         const std::vector<FrameStamp>& b,
@@ -79,8 +80,10 @@ private:
         std::string comparisonType;  // "cross_stream" | "cross_device"
         int         deviceI, deviceJ;
         std::string streamLabel;     // "depth+color" | "depth" | "color"
-        int64_t     hwDiffUs;
-        int64_t     sysDiffUs;
+        int64_t     hwDiffUs;        // 设备端时间戳差 (timeStampUs)
+        int64_t     globalDiffUs;    // 全局时间戳差 (globalTimeStampUs)
+        int64_t     sysDiffUs;       // 主机端时间戳差 (systemTimeStampUs)
+        int64_t     timestampUs;     // 参考帧的设备端时间戳
     };
     std::vector<DiffRecord> allDiffs_;
 };

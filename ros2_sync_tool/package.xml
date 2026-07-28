@@ -10,7 +10,8 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <depend>orbbec_camera</depend>
+  <!-- orbbec_camera 是运行时依赖（topic 类型用 sensor_msgs 标准消息），非编译依赖 -->
+  <!-- <depend>orbbec_camera</depend> -->
 
   <export>
     <build_type>ament_cmake</build_type>

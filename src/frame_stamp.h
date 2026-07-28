@@ -12,9 +12,10 @@ enum class StreamType {
 };
 
 struct FrameStamp {
-    int64_t    hwTimestampUs;   // 硬件时间戳 (OB_FRAME_METADATA_TYPE_TIMESTAMP)
-    int64_t    sysTimestampUs;  // 软件时间戳 (std::chrono::system_clock at callback)
-    int64_t    frameNumber;     // 帧序号 (OB_FRAME_METADATA_TYPE_FRAME_NUMBER)
+    int64_t    hwTimestampUs;   // 硬件时间戳 (frame->timeStampUs(), 即设备端时间)
+    int64_t    globalTimestampUs; // 全局时间戳 (frame->globalTimeStampUs(), 即跨设备同步时钟)
+    int64_t    sysTimestampUs;  // 系统时间戳 (frame->systemTimeStampUs(), 即主机端时间)
+    int64_t    frameNumber;     // 帧序号
     int        deviceIndex;     // 设备索引 (0, 1, 2, ...)
     StreamType streamType;      // DEPTH 或 COLOR
 };
