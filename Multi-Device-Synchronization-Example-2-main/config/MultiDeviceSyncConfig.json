@@ -1,0 +1,30 @@
+{
+    "version": "1.0.1",
+    "configTime": "2023/01/01",
+    "devices": [
+        {
+            "sn": "CP2194200060",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_PRIMARY",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            }
+        },
+        {
+            "sn": "CP0Y8420004K",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_SECONDARY",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            }
+        }
+    ]
+}

@@ -31,6 +31,7 @@ static void printUsage(const char* prog) {
               << "  --hw-threshold=N    HW timestamp pairing threshold in us (default: 500)\n"
               << "  --no-depth          Disable depth stream\n"
               << "  --no-color          Disable color stream\n"
+              << "  --outdir=PATH       Save captured color frames as PNG + timestamps.csv to PATH\n"
               << "  --csv=PATH          CSV export path (required)\n"
               << "  --help              Show this help message\n"
               << std::endl;
@@ -73,6 +74,7 @@ int main(int argc, char* argv[]) {
             if (parseArg(arg, "--width=",         dcCfg.width))         continue;
             if (parseArg(arg, "--height=",        dcCfg.height))        continue;
             if (parseArg(arg, "--hw-threshold=",  saCfg.hwThresholdUs)) continue;
+            if (parseArg(arg, "--outdir=",        dcCfg.outputDir))     continue;
             if (parseArg(arg, "--csv=",           csvPath))             continue;
             std::cerr << "Unknown option: " << arg << "\n";
             printUsage(argv[0]);
@@ -93,6 +95,7 @@ int main(int argc, char* argv[]) {
                   << "  color=" << (dcCfg.useColor ? "on" : "off") << std::endl;
         std::cout << "  hw-threshold=" << saCfg.hwThresholdUs << "us"
                   << "  csv=" << csvPath << std::endl;
+        std::cout << "  outdir=" << (dcCfg.outputDir.empty() ? "(off)" : dcCfg.outputDir) << std::endl;
         std::cout << std::endl;
 
         DataCollector collector;

@@ -51,12 +51,15 @@ public:
     void exportCSV(const std::string& path) const;
 
 private:
-    // 通用配对: 两组 FrameStamp → 硬件时间戳差 + 软件时间戳差 + 参考帧时间戳
-    static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
+    // 通用配对: 两组 FrameStamp → 匹配时间戳差 + 软件时间戳差 + 参考帧时间戳 + 硬件时间戳差
+    // matchDiffs: 匹配用的时间戳差值（useGlobalTimestamp=false 时同 hwDiffs，true 时同 globalDiffs）
+    // hwDiffs:   总是硬件时间戳差 (timeStampUs)
+    static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
     matchAndDiff(
         const std::vector<FrameStamp>& a,
         const std::vector<FrameStamp>& b,
-        int64_t hwThresholdUs
+        int64_t hwThresholdUs,
+        bool useGlobalTimestamp = false
     );
 
     // 根据 diff 向量计算 PairStats

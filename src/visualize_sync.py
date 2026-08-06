@@ -3,7 +3,7 @@
 visualize_sync.py — HW timestamp sync precision histogram.
 
 Generates a single three-in-one overview chart:
-  X-axis = sync precision time difference (hw_diff_us, signed)
+  X-axis = sync precision time difference (|hw_diff_us|, absolute value)
   Y-axis = frequency (count per bin)
 
 Bin width and tick spacing both fixed at 50 us.
@@ -20,7 +20,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, MaxNLocator
+from matplotlib.ticker import FuncFormatter, MaxNLocator, MultipleLocator
 
 
 # ── Palette ────────────────────────────────────────────────────────────
@@ -46,14 +46,21 @@ def parse_args():
     return parser.parse_args()
 
 
-def read_csv(csv_path: str) -> dict[str, list[float]]:
+def read_csv(csv_path: str, max_diff_us: float = 20000.0) -> dict[str, list[float]]:
     data = defaultdict(list)
+    skipped = 0
     with open(csv_path, 'r') as f:
         for row in csv.DictReader(f):
+            diff = float(row['hw_diff_us'])
+            if abs(diff) > max_diff_us:
+                skipped += 1
+                continue
             key = row['comparison_type']
             if key == 'cross_device':
                 key = f"cross_device_{row['stream']}"
-            data[key].append(float(row['hw_diff_us']))
+            data[key].append(diff)
+    if skipped:
+        print(f"  Filtered out {skipped} records with |diff| > {max_diff_us:.0f} us")
     return dict(data)
 
 
@@ -114,7 +121,7 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         axes = [axes]
 
     for ax, (key, label) in zip(axes, present):
-        values = np.array(all_data[key])
+        values = np.abs(np.array(all_data[key]))
         stats = compute_stats(values)
         mean, median, std = stats['mean'], stats['median'], stats['std']
 
@@ -156,15 +163,17 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         # ── Axis styling ──────────────────────────────────────────
         ax.set_title(label, fontsize=12, fontweight='bold',
                      color=TEXT_PRIMARY, pad=10)
-        ax.set_xlabel('HW diff (us)', fontsize=10, color=TEXT_PRIMARY)
+        ax.set_xlabel('|HW diff| (us)', fontsize=10, color=TEXT_PRIMARY)
         ax.set_ylabel('Frequency', fontsize=10, color=TEXT_PRIMARY)
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:,.0f}'))
 
-        # Fixed 50 us bins; ticks auto-spaced to prevent label overlap
+        # Major ticks: auto-spaced labels; Minor ticks: every 50 us (the bin width)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=12, integer=True, steps=[1, 2, 5, 10]))
+        ax.xaxis.set_minor_locator(MultipleLocator(BIN_WIDTH_US))
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:.0f}'))
 
         ax.grid(axis='y', color=GRID_COLOR, linewidth=0.8, alpha=0.7, zorder=0)
+        ax.tick_params(axis='x', which='minor', length=4, color=TEXT_SECONDARY)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.spines['left'].set_color(AXIS_COLOR)

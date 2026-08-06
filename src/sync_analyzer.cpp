@@ -9,16 +9,17 @@
 #include <iomanip>
 #include <iostream>
 
-std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
+std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
 SyncAnalyzer::matchAndDiff(
     const std::vector<FrameStamp>& a,
     const std::vector<FrameStamp>& b,
-    int64_t hwThresholdUs)
+    int64_t hwThresholdUs,
+    bool useGlobalTimestamp)
 {
-    std::vector<int64_t> hwDiffs, sysDiffs, timestamps;
+    std::vector<int64_t> matchDiffs, sysDiffs, timestamps, hwDiffs;
 
     if (a.empty() || b.empty()) {
-        return {hwDiffs, sysDiffs, timestamps};
+        return {matchDiffs, sysDiffs, timestamps, hwDiffs};
     }
 
     for (size_t mi = 0; mi < a.size(); mi++) {
@@ -26,7 +27,12 @@ SyncAnalyzer::matchAndDiff(
         size_t  bestIdx  = 0;
 
         for (size_t mj = 0; mj < b.size(); mj++) {
-            int64_t dist = std::abs(a[mi].hwTimestampUs - b[mj].hwTimestampUs);
+            int64_t dist;
+            if (useGlobalTimestamp) {
+                dist = std::abs(a[mi].globalTimestampUs - b[mj].globalTimestampUs);
+            } else {
+                dist = std::abs(a[mi].hwTimestampUs - b[mj].hwTimestampUs);
+            }
             if (dist < bestDist) {
                 bestDist = dist;
                 bestIdx  = mj;
@@ -34,13 +40,18 @@ SyncAnalyzer::matchAndDiff(
         }
 
         if (bestDist < hwThresholdUs) {
+            if (useGlobalTimestamp) {
+                matchDiffs.push_back(a[mi].globalTimestampUs - b[bestIdx].globalTimestampUs);
+            } else {
+                matchDiffs.push_back(a[mi].hwTimestampUs - b[bestIdx].hwTimestampUs);
+            }
             hwDiffs.push_back(a[mi].hwTimestampUs - b[bestIdx].hwTimestampUs);
             sysDiffs.push_back(a[mi].sysTimestampUs - b[bestIdx].sysTimestampUs);
             timestamps.push_back(a[mi].sysTimestampUs);  // reference frame's system timestamp
         }
     }
 
-    return {hwDiffs, sysDiffs, timestamps};
+    return {matchDiffs, sysDiffs, timestamps, hwDiffs};
 }
 
 SyncAnalyzer::PairStats
@@ -96,7 +107,7 @@ void SyncAnalyzer::run(
     for (int i = 0; i < deviceCount; i++) {
         if (frames[i][DEPTH_IDX].empty() || frames[i][COLOR_IDX].empty()) continue;
 
-        auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
+        auto [hwDiffs, sysDiffs, timestamps, hwDiffs2] = matchAndDiff(
             frames[i][DEPTH_IDX], frames[i][COLOR_IDX], cfg.hwThresholdUs);
 
         auto stats = computeStats(i, i, StreamType::DEPTH, true, hwDiffs, sysDiffs);
@@ -104,42 +115,42 @@ void SyncAnalyzer::run(
 
         for (size_t k = 0; k < hwDiffs.size(); k++) {
             // 计算 globalTimestampUs 差值
-            int64_t globalDiff = frames[i][DEPTH_IDX][k < frames[i][DEPTH_IDX].size() ? k : 0].globalTimestampUs
-                               - frames[i][COLOR_IDX][k < frames[i][COLOR_IDX].size() ? k : 0].globalTimestampUs;
+            int64_t globalDiff = frames[i][DEPTH_IDX][k].globalTimestampUs
+                               - frames[i][COLOR_IDX][k].globalTimestampUs;
             allDiffs_.push_back({"cross_stream", i, i, "depth+color", hwDiffs[k], globalDiff, sysDiffs[k], timestamps[k]});
         }
     }
 
-    // 2. 跨设备同流 Depth
+    // 2. 跨设备同流 Depth (使用 globalTimestampUs 匹配)
     for (int i = 0; i < deviceCount; i++) {
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][DEPTH_IDX].empty() || frames[j][DEPTH_IDX].empty()) continue;
 
-            auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
-                frames[i][DEPTH_IDX], frames[j][DEPTH_IDX], cfg.hwThresholdUs);
+            auto [timeDiffs, sysDiffs, timestamps, hwDiffs] = matchAndDiff(
+                frames[i][DEPTH_IDX], frames[j][DEPTH_IDX], cfg.hwThresholdUs, true);
 
-            auto stats = computeStats(i, j, StreamType::DEPTH, false, hwDiffs, sysDiffs);
+            auto stats = computeStats(i, j, StreamType::DEPTH, false, timeDiffs, sysDiffs);
             crossDeviceDepthStats_.push_back(stats);
 
-            for (size_t k = 0; k < hwDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], 0, sysDiffs[k], timestamps[k]});
+            for (size_t k = 0; k < timeDiffs.size(); k++) {
+                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], timeDiffs[k], sysDiffs[k], timestamps[k]});
             }
         }
     }
 
-    // 3. 跨设备同流 Color
+    // 3. 跨设备同流 Color (使用 globalTimestampUs 匹配)
     for (int i = 0; i < deviceCount; i++) {
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][COLOR_IDX].empty() || frames[j][COLOR_IDX].empty()) continue;
 
-            auto [hwDiffs, sysDiffs, timestamps] = matchAndDiff(
-                frames[i][COLOR_IDX], frames[j][COLOR_IDX], cfg.hwThresholdUs);
+            auto [timeDiffs, sysDiffs, timestamps, hwDiffs] = matchAndDiff(
+                frames[i][COLOR_IDX], frames[j][COLOR_IDX], cfg.hwThresholdUs, true);
 
-            auto stats = computeStats(i, j, StreamType::COLOR, false, hwDiffs, sysDiffs);
+            auto stats = computeStats(i, j, StreamType::COLOR, false, timeDiffs, sysDiffs);
             crossDeviceColorStats_.push_back(stats);
 
-            for (size_t k = 0; k < hwDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], 0, sysDiffs[k], timestamps[k]});
+            for (size_t k = 0; k < timeDiffs.size(); k++) {
+                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], timeDiffs[k], sysDiffs[k], timestamps[k]});
             }
         }
     }
