@@ -172,6 +172,41 @@ else()
 endif()
 
 # ============================================================================
+# Target 5: FrameCollector (record ALL frames individually, no online matching)
+# ============================================================================
+add_executable(FrameCollector
+    MultiDeviceSync/FrameCollector.cpp
+    common/PipelineHolder.cpp
+    common/utils/cJSON.c
+    common/utils/utils.cpp
+    common/utils/utils_c.c
+    common/utils/utils_opencv.cpp
+)
+
+target_include_directories(FrameCollector PUBLIC
+    "${OB_SDK_DIR}/include/"
+    "${COMMON_DIR}"
+    "${COMMON_DIR}/utils"
+)
+
+target_include_directories(FrameCollector PUBLIC ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(FrameCollector PUBLIC ${OpenCV_LIBS})
+target_link_libraries(FrameCollector PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+
+if(WIN32)
+    target_link_libraries(FrameCollector PUBLIC "${OB_SDK_DIR}/lib/OrbbecSDK.lib")
+    add_custom_command(TARGET FrameCollector POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${OB_SDK_DIR}/bin" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    )
+else()
+    file(GLOB LIB_ORBBECSDK_FILES_FC "${OB_SDK_DIR}/lib/*.so")
+    target_link_libraries(FrameCollector PUBLIC ${LIB_ORBBECSDK_FILES_FC})
+    add_custom_command(TARGET FrameCollector POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${OB_SDK_DIR}/lib" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    )
+endif()
+
+# ============================================================================
 # Copy config files
 # ============================================================================
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/config/OrbbecSDKConfig.xml DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})

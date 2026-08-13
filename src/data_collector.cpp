@@ -84,21 +84,9 @@ void DataCollector::configureSyncMode() {
         std::string connType = info->connectionType() ? info->connectionType() : "USB";
 
         OBMultiDeviceSyncConfig cfg = devices_[i]->getMultiDeviceSyncConfig();
-        if (connType == "GMSL2") {
-            // GMSL: 所有相机设为 HARDWARE_TRIGGERING，触发来自外部硬件信号
-            // 和 MultiDeviceSync 一致
-            cfg.syncMode         =    OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING;
-            cfg.triggerOutEnable = false;
-        } else {
-            // USB: Primary/Secondary mode
-            if (i == 0) {
-                cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_PRIMARY;
-                cfg.triggerOutEnable = true;
-            } else {
-                cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_SECONDARY;
-                cfg.triggerOutEnable = false;
-            }
-        }
+        // All devices HARDWARE_TRIGGERING (external HW trigger signal)
+        cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING;
+        cfg.triggerOutEnable = false;
         cfg.depthDelayUs         = 0;
         cfg.colorDelayUs         = 0;
         cfg.trigger2ImageDelayUs = 0;
@@ -106,10 +94,17 @@ void DataCollector::configureSyncMode() {
         cfg.framesPerTrigger     = 1;
         devices_[i]->setMultiDeviceSyncConfig(cfg);
 
+        // // Enable FPS boost in hardware trigger mode (OB_PROP_FPS_BOOST_BOOL = 275)
+        // // 仅对支持该属性的设备生效(如 Gemini 305g 不支持,跳过避免抛异常)
+        // bool fpsBoost = false;
+        // if (devices_[i]->isPropertySupported(OB_PROP_FPS_BOOST_BOOL, OB_PERMISSION_WRITE)) {
+        //     devices_[i]->setBoolProperty(OB_PROP_FPS_BOOST_BOOL, true);
+        //     fpsBoost = devices_[i]->getBoolProperty(OB_PROP_FPS_BOOST_BOOL);
+        // }
+
         auto sn = info->serialNumber();
         std::cout << "Device " << i << " (SN=" << sn
-                  << "  type=" << connType << "): "
-                  << (connType == "GMSL2" ? "HARDWARE_TRIGGERING" : (i == 0 ? "PRIMARY" : "SECONDARY"))
+                  << "  type=" << connType << "): HARDWARE_TRIGGERING"
                   << "  triggerOut=" << (cfg.triggerOutEnable ? "true" : "false") << std::endl;
     }
 
@@ -122,30 +117,14 @@ void DataCollector::configureSyncMode() {
 }
 
 void DataCollector::resetTimestampAndSyncClock() {
-    // 检查是否 GMSL 模式
-    bool isGmsl = false;
-    if (!devices_.empty()) {
-        auto info = devices_[0]->getDeviceInfo();
-        std::string connType = info->connectionType() ? info->connectionType() : "USB";
-        isGmsl = (connType == "GMSL2");
-    }
+    // HARDWARE_TRIGGERING mode: trigger comes from external HW signal,
+    // no timestamp reset needed. Only do per-device clock sync with host.
 
-    if (isGmsl) {
-        // GMSL: 触发来自外部硬件信号，跳过时间戳复位
-        // 和 MultiDeviceSync 一致
-        std::cout << "\nGMSL mode: skip timestamp reset (use external HW trigger)."
-                  << std::endl;
-    } else {
-        // USB: PRIMARY 发送时间戳复位信号给所有 SECONDARY
-        devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_TRIGGER_OUT_ENABLE_BOOL, true);
-        devices_[0]->setIntProperty(OB_PROP_TIMER_RESET_DELAY_US_INT, 20);
-        devices_[0]->setBoolProperty(OB_PROP_TIMER_RESET_SIGNAL_BOOL, true);
-        std::cout << "\nTimestamp reset sent (primary -> all secondaries, delay=20us)" << std::endl;
+    // Per-device one-shot clock sync (FAE recommended over enableDeviceClockSync)
+    for (auto &dev : devices_) {
+        dev->timerSyncWithHost();
     }
-
-    // 和 MultiDeviceSync 一致：每 60 秒同步一次
-    context_->enableDeviceClockSync(60000);
-    std::cout << "Device clock sync enabled (every 60s)" << std::endl;
+    std::cout << "Per-device timer sync completed (" << devices_.size() << " devices)" << std::endl;
 }
 
 // 把 color 帧转换为 cv::Mat(BGR)，格式转换逻辑参考官方示例
@@ -351,4 +330,28 @@ void DataCollector::collectFrames(const Config& cfg) {
         totalFrames += depthCount + colorCount;
     }
     std::cout << "Total frames: " << totalFrames << std::endl;
+}
+
+void DataCollector::exportRawCSV(const std::string& path) const {
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "[WARN] cannot open raw CSV: " << path << std::endl;
+        return;
+    }
+    f << "deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs\n";
+    int count = 0;
+    for (size_t i = 0; i < allFrames_.size(); i++) {
+        for (size_t s = 0; s < allFrames_[i].size(); s++) {
+            for (const auto& fs : allFrames_[i][s]) {
+                f << fs.deviceIndex << ","
+                  << (fs.streamType == StreamType::DEPTH ? "DEPTH" : "COLOR") << ","
+                  << fs.hwTimestampUs << ","
+                  << fs.globalTimestampUs << ","
+                  << fs.sysTimestampUs << "\n";
+                count++;
+            }
+        }
+    }
+    f.close();
+    std::cout << "Raw CSV exported: " << path << " (" << count << " frames)" << std::endl;
 }

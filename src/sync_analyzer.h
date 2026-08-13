@@ -32,7 +32,15 @@ public:
         double     sysMeanUs, sysStddevUs;
     };
 
-    // 执行分析: 三类对比 → 统计
+    struct MultiDeviceStats {
+        StreamType streamType;          // DEPTH 或 COLOR
+        int        deviceCount;         // 参与匹配的设备数
+        int        matchCount;          // 成功匹配组数
+        int64_t    hwMinUs, hwMaxUs;    // 每组 max(hw)-min(hw) 的最小/最大值
+        double     hwMeanUs, hwStddevUs;
+    };
+
+    // 执行分析: 三类对比 + 多设备匹配 → 统计
     void run(
         const std::vector<std::vector<std::vector<FrameStamp>>>& frames,
         const std::vector<std::shared_ptr<ob::Device>>& devices,
@@ -43,6 +51,8 @@ public:
     const std::vector<PairStats>& getCrossStreamStats() const;       // 同设备 Depth vs Color
     const std::vector<PairStats>& getCrossDeviceDepthStats() const;  // 跨设备 Depth vs Depth
     const std::vector<PairStats>& getCrossDeviceColorStats() const;  // 跨设备 Color vs Color
+    const MultiDeviceStats& getMultiDeviceDepthStats() const;        // 多设备同步 Depth
+    const MultiDeviceStats& getMultiDeviceColorStats() const;        // 多设备同步 Color
 
     // 输出控制台报告
     void printReport() const;
@@ -51,10 +61,11 @@ public:
     void exportCSV(const std::string& path) const;
 
 private:
-    // 通用配对: 两组 FrameStamp → 匹配时间戳差 + 软件时间戳差 + 参考帧时间戳 + 硬件时间戳差
+    // 通用配对: 两组 FrameStamp → 匹配时间戳差 + 软件时间戳差 + 参考帧时间戳 + 硬件时间戳差 + 匹配索引
     // matchDiffs: 匹配用的时间戳差值（useGlobalTimestamp=false 时同 hwDiffs，true 时同 globalDiffs）
     // hwDiffs:   总是硬件时间戳差 (timeStampUs)
-    static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>>
+    // matchedIdx: 每个匹配对中 a 的索引和 b 的索引
+    static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<size_t>, std::vector<size_t>>
     matchAndDiff(
         const std::vector<FrameStamp>& a,
         const std::vector<FrameStamp>& b,
@@ -70,6 +81,13 @@ private:
         const std::vector<int64_t>& sysDiffs
     );
 
+    // 多设备最近邻唯一匹配: 所有设备同一流类型 → 每组 max(hw)-min(hw)
+    // 以帧数最少的设备为基准，每帧在其余设备中找最近且未匹配的帧
+    std::vector<int64_t> multiDeviceMatch(
+        const std::vector<std::vector<FrameStamp>>& allDevFrames,
+        int64_t hwThresholdUs
+    );
+
     // 打印单组统计
     void printOneStats(const PairStats& s) const;
 
@@ -77,6 +95,12 @@ private:
     std::vector<PairStats> crossStreamStats_;       // 同设备跨流
     std::vector<PairStats> crossDeviceDepthStats_;  // 跨设备 Depth
     std::vector<PairStats> crossDeviceColorStats_;  // 跨设备 Color
+    MultiDeviceStats       multiDeviceDepthStats_;  // 多设备同步 Depth
+    MultiDeviceStats       multiDeviceColorStats_;  // 多设备同步 Color
+
+    // 多设备匹配原始 diff (用于 CSV)
+    std::vector<int64_t> multiDeviceDepthDiffs_;
+    std::vector<int64_t> multiDeviceColorDiffs_;
 
     // 原始 diff 数据 (用于 CSV 导出)
     struct DiffRecord {

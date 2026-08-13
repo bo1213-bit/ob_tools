@@ -6,11 +6,11 @@ Reads the CSV produced by TimestampRecorder (TimestampRecorder.cpp):
     groupId,deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs
 
 Computes cross-device sync precision as:
-    hw_diff_us = hwTimestampUs(device 1) - hwTimestampUs(device 0)   (same groupId, same streamType)
+    max(hwTimestampUs) - min(hwTimestampUs)   across ALL devices per (groupId, streamType)
 
 Then draws a three-in-one style overview chart identical in style to
 src/visualize_sync.py:
-    X-axis = sync precision time difference (|hw_diff_us|, absolute value)
+    X-axis = sync precision time difference (us)
     Y-axis = frequency (count per bin)
   Bin width and tick spacing both fixed at 50 us.
 
@@ -54,14 +54,17 @@ def parse_args():
 
 def compute_cross_device_diff(csv_path: str, max_diff_us: float = 20000.0) -> dict[str, list[float]]:
     """
-    Group rows by (groupId, streamType), then compute device1 - device0 hw diff.
-    Returns dict: {'depth': [diffs...], 'color': [diffs...]}.
+    Group rows by (groupId, streamType), then compute max(hw) - min(hw) across ALL devices.
+    Returns dict: {'depth': [max_diffs...], 'color': [max_diffs...]}.
     """
     # (groupId, streamType) -> {deviceIndex: hwTimestampUs}
     grouped = defaultdict(dict)
     with open(csv_path, 'r') as f:
         for row in csv.DictReader(f):
-            gid = int(row['groupId'])
+            gid_str = row['groupId']
+            if gid_str.startswith('#'):
+                continue
+            gid = int(gid_str)
             dev = int(row['deviceIndex'])
             st = row['streamType'].strip().upper()
             try:
@@ -78,17 +81,15 @@ def compute_cross_device_diff(csv_path: str, max_diff_us: float = 20000.0) -> di
         # need at least 2 devices to form a cross-device diff
         if len(devmap) < 2:
             continue
-        devs = sorted(devmap.keys())
-        # reference = lowest deviceIndex; diff others relative to it
-        ref = devmap[devs[0]]
-        for d in devs[1:]:
-            diff = devmap[d] - ref
-            if abs(diff) > max_diff_us:
-                skipped += 1
-                continue
-            result[st.lower()].append(diff)
+        # max(hw) - min(hw) across all devices → true worst-case sync precision
+        timestamps = list(devmap.values())
+        max_diff = max(timestamps) - min(timestamps)
+        if max_diff > max_diff_us:
+            skipped += 1
+            continue
+        result[st.lower()].append(float(max_diff))
     if skipped:
-        print(f"  Filtered out {skipped} records with |diff| > {max_diff_us:.0f} us")
+        print(f"  Filtered out {skipped} groups with max(ts)-min(ts) > {max_diff_us:.0f} us")
     return dict(result)
 
 
@@ -110,12 +111,12 @@ def compute_stats(values: np.ndarray) -> dict:
         skew = (n / ((n - 1) * (n - 2))) * float(np.sum(((values - mean) / std) ** 3))
     else:
         skew = 0.0
-    pcts = np.percentile(np.abs(values), [50, 75, 90, 95, 99])
+    pcts = np.percentile(values, [50, 75, 90, 95, 99])
     return {
         'count': n, 'min': float(values.min()), 'max': float(values.max()),
         'mean': mean, 'median': median, 'std': std, 'skew': skew,
-        'abs_p50': pcts[0], 'abs_p75': pcts[1], 'abs_p90': pcts[2],
-        'abs_p95': pcts[3], 'abs_p99': pcts[4],
+        'p50': pcts[0], 'p75': pcts[1], 'p90': pcts[2],
+        'p95': pcts[3], 'p99': pcts[4],
     }
 
 
@@ -149,7 +150,7 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         axes = [axes]
 
     for ax, (key, label) in zip(axes, present):
-        values = np.abs(np.array(all_data[key]))
+        values = np.array(all_data[key])
         stats = compute_stats(values)
         mean, median, std = stats['mean'], stats['median'], stats['std']
 
@@ -174,8 +175,8 @@ def plot_combined_overview(all_data: dict[str, list[float]],
             f'Std = {std:.2f} us',
             f'Skewness: {describe_skew(stats)}',
             f'Range: [{stats["min"]:.0f}, {stats["max"]:.0f}] us',
-            f'|diff|≤ 95%: {stats["abs_p95"]:.0f} us',
-            f'|diff|≤ 99%: {stats["abs_p99"]:.0f} us',
+            f'P50 = {stats["p50"]:.0f} | P95 = {stats["p95"]:.0f}',
+            f'P99 = {stats["p99"]:.0f} us',
         ]
         stats_text = '\n'.join(lines)
 

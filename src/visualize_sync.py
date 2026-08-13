@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument('--output', '-o', default='./charts')
     parser.add_argument('--name', '-n', default=None,
                         help='Output filename (default: overview_combined.png)')
+    parser.add_argument('--max-diff', type=float, default=50000,
+                        help='Filter out |diff| > N us (default: 50000)')
     return parser.parse_args()
 
 
@@ -56,8 +58,8 @@ def read_csv(csv_path: str, max_diff_us: float = 20000.0) -> dict[str, list[floa
                 skipped += 1
                 continue
             key = row['comparison_type']
-            if key == 'cross_device':
-                key = f"cross_device_{row['stream']}"
+            if key in ('cross_device', 'multi_device'):
+                key = f"{key}_{row['stream']}"
             data[key].append(diff)
     if skipped:
         print(f"  Filtered out {skipped} records with |diff| > {max_diff_us:.0f} us")
@@ -104,8 +106,8 @@ def describe_skew(stats: dict) -> str:
 def plot_combined_overview(all_data: dict[str, list[float]],
                            output_dir: str, fname: str = 'overview_combined.png'):
     groups = [
-        ('cross_device_depth',  'Cross-Device  Depth'),
-        ('cross_device_color',  'Cross-Device  Color'),
+        ('multi_device_depth_all', 'Multi-Device Sync  Depth  (all cameras)'),
+        ('multi_device_color_all', 'Multi-Device Sync  Color  (all cameras)'),
     ]
 
     present = [(k, label) for k, label in groups
@@ -151,8 +153,8 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         ]
         stats_text = '\n'.join(lines)
 
-        x_pos = 0.02 if stats['skew'] <= 0 else 0.98
-        ha = 'left' if stats['skew'] <= 0 else 'right'
+        x_pos = 0.98
+        ha = 'right'
         ax.text(x_pos, 0.97, stats_text, transform=ax.transAxes,
                 fontsize=8.5, fontfamily='monospace', va='top', ha=ha,
                 color=TEXT_PRIMARY,
@@ -181,7 +183,7 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         ax.tick_params(colors=TEXT_SECONDARY, labelsize=8.5)
 
         # Legend
-        legend = ax.legend(fontsize=9, framealpha=0.85,
+        legend = ax.legend(fontsize=9, framealpha=0.85, loc='upper left',
                            edgecolor='#d0cfc7', facecolor='#fcfcfb')
         legend.set_zorder(11)
 
@@ -197,7 +199,7 @@ def main():
     os.makedirs(args.output, exist_ok=True)
 
     print(f"Reading: {args.csv}")
-    data = read_csv(args.csv)
+    data = read_csv(args.csv, max_diff_us=args.max_diff)
     for k, v in data.items():
         print(f"  {k}: {len(v):,} records")
 

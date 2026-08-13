@@ -79,8 +79,6 @@ std::vector<std::pair<std::shared_ptr<ob::Frame>, std::shared_ptr<ob::Frame>>> F
 
         groupsAttempted_++;                      // frame-loss diagnostics
 
-        bool discardFrame = false;
-
         std::map<int, std::shared_ptr<ob::Frame>> depthFramesMap;
         std::map<int, std::shared_ptr<ob::Frame>> colorFramesMap;
 
@@ -91,6 +89,15 @@ std::vector<std::pair<std::shared_ptr<ob::Frame>, std::shared_ptr<ob::Frame>>> F
         const auto &refHolder     = *refIter;
         auto        refTsp        = getFrameTimestampMsec(refHolder->frontFrame());
         auto        refHalfTspGap = refHolder->halfTspGap;
+
+        // ── Phase 1: Peek at ALL frames first, check window ──────────
+        //    关键修复：先检查所有帧是否在窗口内，不 pop 任何帧。
+        //    如果有帧超窗 → 只丢弃那一帧（pop 它），其余帧保留，
+        //    下次 getFramePairs() 用新的队首重新配对。
+        int  staleDev   = -1;
+        auto staleFrameType = OB_FRAME_DEPTH;  // placeholder
+        auto staleGapUs = uint64_t(0);
+
         for(const auto &item: pipelineHolderVector) {
             auto     tarFrame      = item->frontFrame();
             auto     tarHalfTspGap = item->halfTspGap;
@@ -98,24 +105,43 @@ std::vector<std::pair<std::shared_ptr<ob::Frame>, std::shared_ptr<ob::Frame>>> F
             auto     frameType     = item->getFrameType();
             uint32_t tspHalfGap    = tarHalfTspGap > refHalfTspGap ? tarHalfTspGap : refHalfTspGap;
 
-            // std::cout << "tspHalfGap : " << tspHalfGap << std::endl;
-
             auto tarTsp  = getFrameTimestampMsec(tarFrame);
             auto diffTsp = tarTsp - refTsp;
             if(diffTsp > tspHalfGap) {
-                discardFrame = true;
-                // ---- frame-loss diagnostics: attribute this discard to the out-of-window pipeline ----
-                uint64_t gapUs = static_cast<uint64_t>(diffTsp) * 1000;
-                discardCount_[index][static_cast<int>(frameType)]++;
-                discardGapUs_[index][static_cast<int>(frameType)] += gapUs;
-                discardMaxGapUs_ = std::max(discardMaxGapUs_, gapUs);
-                std::cout << "[PAIR-DROP] dev=" << index << " sensor=" << frameTypeName(frameType)
-                          << " refTsp=" << refTsp << "ms tarTsp=" << tarTsp << "ms"
-                          << " gap=" << gapUs << "us > halfGap=" << tspHalfGap << "ms" << std::endl;
+                staleDev      = index;
+                staleFrameType = frameType;
+                staleGapUs    = static_cast<uint64_t>(diffTsp) * 1000;
                 break;
             }
-
             refHalfTspGap = tarHalfTspGap;
+        }
+
+        if(staleDev >= 0) {
+            // 有帧超窗 → 只丢弃这一帧，其余帧原封不动
+            // 为什么只丢一帧？因为该相机的后续帧（如 1050ms、1068ms）可能恰好
+            // 匹配下一轮的参考帧（当参考帧推进后它们就会落入窗口）。
+            // 一次只丢一帧，让参考帧和超窗帧各自逐步靠近，最终对齐。
+            for(const auto &item: pipelineHolderVector) {
+                if(item->getDeviceIndex() == staleDev && item->getFrameType() == staleFrameType) {
+                    item->getFrame();  // pop and discard exactly one stale frame
+                    break;
+                }
+            }
+            groupsDiscarded_++;
+            discardCount_[staleDev][static_cast<int>(staleFrameType)]++;
+            discardGapUs_[staleDev][static_cast<int>(staleFrameType)] += staleGapUs;
+            discardMaxGapUs_ = std::max(discardMaxGapUs_, staleGapUs);
+            std::cout << "[FRAME-DROP] dev=" << staleDev << " sensor=" << frameTypeName(staleFrameType)
+                      << " refTsp=" << refTsp << "ms gap=" << staleGapUs
+                      << "us > halfGap=" << refHolder->halfTspGap << "ms"
+                      << "  (popped 1 stale frame, others preserved)" << std::endl;
+            return framePairs;
+        }
+
+        // ── Phase 2: All frames within window → pop all and build group ──
+        for(const auto &item: pipelineHolderVector) {
+            int  index     = item->getDeviceIndex();
+            auto frameType = item->getFrameType();
 
             if(frameType == OB_FRAME_DEPTH) {
                 depthFramesMap[index] = item->getFrame();
@@ -123,13 +149,6 @@ std::vector<std::pair<std::shared_ptr<ob::Frame>, std::shared_ptr<ob::Frame>>> F
             if(frameType == OB_FRAME_COLOR) {
                 colorFramesMap[index] = item->getFrame();
             }
-        }
-
-        if(discardFrame) {
-            groupsDiscarded_++;                  // frame-loss diagnostics
-            depthFramesMap.clear();
-            colorFramesMap.clear();
-            return framePairs;
         }
 
         std::cout << "=================================================" << std::endl;

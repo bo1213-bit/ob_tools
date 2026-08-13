@@ -2,19 +2,21 @@
 // Licensed under the MIT License.
 
 /**
- * @file TimestampRecorder.cpp
- * @brief Record paired-frame timestamps from a synced multi-device setup into a CSV.
+ * @file FrameCollector.cpp
+ * @brief Record ALL frames (depth+color) from ALL devices to CSV — NO online matching.
  *
- * Reuses the official MultiDeviceSync pipeline (config file + FramePairingManager),
- * but instead of rendering to a window it extracts the timestamps of each
- * successfully-paired (depth, color) frame group and writes them to a CSV.
+ * Unlike TimestampRecorder which uses FramePairingManager to pair frames in
+ * real-time (and discards unmatched frames), this collector writes every single
+ * frame as it arrives.  Cross-device pairing is done offline in Python.
  *
- * @usage TimestampRecorder --csv <path> [--duration <seconds>]
+ * CSV format (one row per frame):
+ *   deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs
+ *
+ * @usage FrameCollector --csv <path> [--duration <seconds>]
  */
 
 #include <libobsensor/ObSensor.hpp>
 #include "PipelineHolder.hpp"
-#include "FramePairingManager.hpp"
 #include "utils.hpp"
 #include "utils_opencv.hpp"
 #include "utils/cJSON.h"
@@ -43,7 +45,7 @@ typedef struct DeviceConfigInfo_t {
     OBMultiDeviceSyncConfig syncConfig;
 } DeviceConfigInfo;
 
-// ---- shared with config loading (mirrors MultiDeviceSync.cpp) ----
+// ---- shared with config loading ----
 static std::vector<std::shared_ptr<ob::Device>>       streamDevList;
 static std::vector<std::shared_ptr<ob::Device>>       configDevList;
 static std::vector<std::shared_ptr<DeviceConfigInfo>> deviceConfigList;
@@ -53,6 +55,8 @@ static ob::Context context;
 
 // ---- CSV output ----
 static std::ofstream g_csvFile;
+static std::mutex    g_csvMutex;
+static uint64_t      g_frameWritten = 0;
 
 // ---- graceful shutdown ----
 static volatile sig_atomic_t g_stopRequested = 0;
@@ -63,7 +67,7 @@ static void signalHandler(int /*signum*/) {
 // ---- forward declarations ----
 bool                    loadConfigFile();
 int                     configMultiDeviceSync();
-int                     recordTimestampCsv(const std::string &csvPath, int recordSeconds);
+int                     collectFramesRaw(const std::string &csvPath, int recordSeconds);
 std::shared_ptr<PipelineHolder> createPipelineHolder(std::shared_ptr<ob::Device> device, OBSensorType sensorType, int deviceIndex);
 std::string             readFileContent(const char *filePath);
 OBMultiDeviceSyncMode   stringToOBSyncMode(const std::string &modeString);
@@ -73,7 +77,7 @@ int                     strcmp_nocase(const char *str0, const char *str1);
 //  main
 // ============================================================================
 int main(int argc, char *argv[]) try {
-    std::signal(SIGINT, signalHandler);   // Ctrl+C 优雅退出
+    std::signal(SIGINT, signalHandler);
 
     int         recordSeconds = 0;
     std::string csvPath;
@@ -88,13 +92,13 @@ int main(int argc, char *argv[]) try {
     }
 
     if(csvPath.empty()) {
-        std::cout << "Usage: TimestampRecorder --csv <path> [--duration <seconds>]\n"
-                  << "  e.g. TimestampRecorder --csv ./timestamps.csv --duration 300\n"
-                  << "  Records paired-frame timestamps (depth+color, all devices) to CSV.\n";
+        std::cout << "Usage: FrameCollector --csv <path> [--duration <seconds>]\n"
+                  << "  e.g. FrameCollector --csv ./frames.csv --duration 300\n"
+                  << "  Records ALL frames (every device, depth+color) to CSV — no matching.\n";
         return 1;
     }
 
-    std::cout << "TimestampRecorder - csv=" << csvPath
+    std::cout << "FrameCollector - csv=" << csvPath
               << "  duration=" << recordSeconds << "s" << std::endl;
 
     if(!loadConfigFile()) {
@@ -113,7 +117,7 @@ int main(int argc, char *argv[]) try {
     }
     std::cout << "Config MultiDeviceSync Success." << std::endl;
 
-    return recordTimestampCsv(csvPath, recordSeconds);
+    return collectFramesRaw(csvPath, recordSeconds);
 }
 catch(ob::Error &e) {
     std::cerr << "function:" << e.getFunction() << "\nargs:" << e.getArgs() << "\nmessage:" << e.what()
@@ -122,7 +126,7 @@ catch(ob::Error &e) {
 }
 
 // ============================================================================
-//  config loading (copied from MultiDeviceSync.cpp)
+//  config loading (copied from TimestampRecorder.cpp)
 // ============================================================================
 
 std::string readFileContent(const char *filePath) {
@@ -271,7 +275,6 @@ int configMultiDeviceSync() {
                 curConfig.triggerOutEnable     = config->syncConfig.triggerOutEnable;
                 curConfig.triggerOutDelayUs    = config->syncConfig.triggerOutDelayUs;
                 curConfig.framesPerTrigger     = config->syncConfig.framesPerTrigger;
-                std::cout << "-Config Device syncMode:" << curConfig.syncMode << std::endl;
                 device->setMultiDeviceSyncConfig(curConfig);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -295,12 +298,10 @@ std::shared_ptr<PipelineHolder> createPipelineHolder(std::shared_ptr<ob::Device>
 }
 
 // ============================================================================
-//  stream setup (copied from MultiDeviceSync.cpp)
+//  stream setup
 // ============================================================================
 
 void startDeviceStreams(const std::vector<std::shared_ptr<ob::Device>> &devices, int startIndex) {
-    // depth + color 一起开：这些 Orbbec 设备在 SECONDARY_SYNCED 模式下，只开 color 流不出帧，
-    // 必须 depth 和 color 同时启用 color 才会有数据。depth 帧只占流水线，不保存。
     std::vector<OBSensorType> sensorTypes = { OB_SENSOR_DEPTH, OB_SENSOR_COLOR };
     for(auto &dev: devices) {
         for(auto sensorType: sensorTypes) {
@@ -313,10 +314,10 @@ void startDeviceStreams(const std::vector<std::shared_ptr<ob::Device>> &devices,
 }
 
 // ============================================================================
-//  main recording loop — write paired-frame timestamps to CSV
+//  main collection loop — write EVERY frame, NO matching
 // ============================================================================
 
-int recordTimestampCsv(const std::string &csvPath, int recordSeconds) {
+int collectFramesRaw(const std::string &csvPath, int recordSeconds) {
     try {
         streamDevList.clear();
 
@@ -353,7 +354,6 @@ int recordTimestampCsv(const std::string &csvPath, int recordSeconds) {
         }
 
         // sync each device's timer with host once at startup (per FAE recommendation)
-        // use per-device timerSyncWithHost() instead of context.enableDeviceClockSync(60000)
         for(auto &dev: streamDevList) {
             dev->timerSyncWithHost();
         }
@@ -365,93 +365,81 @@ int recordTimestampCsv(const std::string &csvPath, int recordSeconds) {
             std::cerr << "Failed to open csv file: " << csvPath << std::endl;
             return -1;
         }
-        g_csvFile << "groupId,deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs\n";
+        g_csvFile << "deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs\n";
         g_csvFile.flush();
         std::cout << "CSV opened: " << csvPath << std::endl;
 
-        // pairing manager — consumes all pipeline queues and pairs by timestamp
-        auto framePairingManager = std::make_shared<FramePairingManager>();
-        framePairingManager->setPipelineHolderList(pipelineHolderList);
-
         auto startTime = std::chrono::steady_clock::now();
         auto recordEnd = startTime + std::chrono::seconds(recordSeconds > 0 ? recordSeconds : 0);
+        bool endless   = (recordSeconds <= 0);
 
-        // recordSeconds <= 0 means "run until Ctrl+C" (never auto-stop)
-        bool  endless  = (recordSeconds <= 0);
-        int   groupId  = 0;
-        int   lastSec  = -1;
-        int   savedRow = 0;
+        int lastSec = -1;
+        std::cout << "Collecting frames" << (endless ? " (until Ctrl+C)" : "") << "..." << std::endl;
 
-        std::cout << "Recording timestamps" << (endless ? " (until Ctrl+C)" : "") << "..." << std::endl;
-
+        // ── NO matching, NO grouping ─────────────────────────────────
+        // Drain every pipeline holder's queue: pop all available frames
+        // and write each one as an independent row.
+        // Offline matching is done by match_raw_frames.py.
         while(!g_stopRequested) {
             auto now = std::chrono::steady_clock::now();
             if(!endless && now >= recordEnd) {
                 break;
             }
 
-            // 拿配对成功的一组帧（每台相机 depth+color 各一帧）
-            auto framePairs = framePairingManager->getFramePairs();
-            if(framePairs.empty()) {
-                // 本次没有相机配对成功（队列未齐 / 超时 / 配对失败），不记
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                continue;
-            }
+            bool anyFrame = false;
+            for(const auto &holder: pipelineHolderList) {
+                while(holder->isFrameReady()) {
+                    auto frame = holder->getFrame();
+                    if(!frame) break;
 
-            groupId++;
-            // deviceIndex 语义：getFramePairs() 按 i=0,1,2... 逐台弹帧
-            // (FramePairingManager.cpp:137 的 for(i) 循环，i 即 deviceIndex，
-            //  缺 key 时 map[i] 返回 nullptr 但不跳号)，
-            // 所以第 idx 对 = 相机 idx；idx 超出实际设备时 pair 为 nullptr，下面挡掉。
-            for(size_t idx = 0; idx < framePairs.size(); idx++) {
-                const auto &pair = framePairs[idx];
-                if(!pair.first && !pair.second) continue;   // 该设备未配对成功（map 缺 key）
-                // pair.first  = depth 帧, pair.second = color 帧 (FramePairingManager.cpp:152)
-                for(int which = 0; which < 2; which++) {
-                    auto frame = (which == 0) ? pair.first : pair.second;
-                    if(!frame) continue;
+                    const char *streamType = (holder->getSensorType() == OB_SENSOR_DEPTH) ? "DEPTH" : "COLOR";
 
-                    g_csvFile << groupId << ","
-                              << idx << ","
-                              << (which == 0 ? "DEPTH" : "COLOR") << ","
-                              << frame->timeStampUs() << ","
-                              << frame->globalTimeStampUs() << ","
-                              << frame->systemTimeStampUs() << "\n";
-                    savedRow++;
+                    {
+                        std::lock_guard<std::mutex> lock(g_csvMutex);
+                        g_csvFile << holder->getDeviceIndex() << ","
+                                  << streamType << ","
+                                  << frame->timeStampUs() << ","
+                                  << frame->globalTimeStampUs() << ","
+                                  << frame->systemTimeStampUs() << "\n";
+                        g_frameWritten++;
+                    }
+                    anyFrame = true;
                 }
             }
-            g_csvFile.flush();
 
-            // 进度：每秒打印一行
+            if(anyFrame) {
+                g_csvFile.flush();
+            }
+
+            // progress per second
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - startTime).count();
             if(static_cast<int>(elapsed) != lastSec) {
                 lastSec = static_cast<int>(elapsed);
-                std::cout << "Elapsed: " << elapsed << "s, groups: " << groupId
-                          << ", rows: " << savedRow << std::endl;
+                std::cout << "Elapsed: " << elapsed << "s, frames: " << g_frameWritten << std::endl;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
-        std::cout << "\nRecording complete. " << groupId << " groups, "
-                  << savedRow << " rows written to " << csvPath << std::endl;
-        framePairingManager->printSummary();
+        std::cout << "\nCollection complete. " << g_frameWritten
+                  << " frames written to " << csvPath << std::endl;
 
-        // write summary to CSV
-        g_csvFile << "# ---- summary ----\n";
-        g_csvFile << "# groups " << groupId << "\n";
-        g_csvFile << "# rows " << savedRow << "\n";
-        g_csvFile << "# deviceIndex,streamType,framesReceived,framesConsumed,queueRemaining,dropped\n";
-        for(const auto &holder: pipelineHolderList) {
-            uint64_t recv   = holder->getFramesReceived();
-            uint64_t cons   = holder->getFramesConsumed();
-            uint64_t queued = static_cast<uint64_t>(holder->getFrameQueueSize());
-            uint64_t dropped = recv > cons + queued ? (recv - cons - queued) : 0;
-            g_csvFile << "# " << holder->getDeviceIndex() << ","
-                      << (holder->getSensorType() == OB_SENSOR_DEPTH ? "DEPTH" : "COLOR") << ","
-                      << recv << "," << cons << "," << queued << "," << dropped << "\n";
+        // summary to CSV
+        {
+            std::lock_guard<std::mutex> lock(g_csvMutex);
+            g_csvFile << "# ---- summary ----\n";
+            g_csvFile << "# totalFrames " << g_frameWritten << "\n";
+            g_csvFile << "# deviceIndex,streamType,framesWritten\n";
+            for(const auto &holder: pipelineHolderList) {
+                uint64_t recv = holder->getFramesReceived();
+                uint64_t cons = holder->getFramesConsumed();
+                uint64_t queued = static_cast<uint64_t>(holder->getFrameQueueSize());
+                g_csvFile << "# " << holder->getDeviceIndex() << ","
+                          << (holder->getSensorType() == OB_SENSOR_DEPTH ? "DEPTH" : "COLOR") << ","
+                          << recv << "," << cons << "," << queued << "\n";
+            }
+            g_csvFile.flush();
         }
-        g_csvFile.flush();
 
         // cleanup
         g_csvFile.close();

@@ -30,6 +30,10 @@ public:
     // 外部调用（如信号处理），通知采集提前停止
     void stop();
 
+    // 将采集到的所有帧导出为原始时间戳 CSV
+    // 格式: deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs
+    void exportRawCSV(const std::string& path) const;
+
     // 返回采集到的帧数据
     // 三维数组: [deviceIndex][streamType][frameIndex]
     // streamType: 0 = DEPTH, 1 = COLOR
