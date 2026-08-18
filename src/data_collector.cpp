@@ -4,8 +4,12 @@
 #include "data_collector.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <exception>
+#include <functional>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 
@@ -19,6 +23,22 @@
 #define MKDIR(path) mkdir(path, 0755)
 #endif
 
+// 写外部触发频率到 debugfs 节点: /sys/kernel/debug/gpio_trigger/framerate
+// 值单位 Hz; 0 表示关闭触发。需要 root 权限。返回是否写入成功。
+static bool writeTriggerFramerate(int hz) {
+    const char* path = "/sys/kernel/debug/gpio_trigger/framerate";
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "[WARN] cannot open trigger node " << path
+                  << " (need root? run with sudo)" << std::endl;
+        return false;
+    }
+    f << hz << std::endl;
+    f.close();
+    std::cout << "[TRIGGER] framerate set to " << hz << " Hz" << std::endl;
+    return true;
+}
+
 void DataCollector::run(const Config& cfg) {
     running_ = true;
     std::cout << "=== DataCollector: Start ===" << std::endl;
@@ -26,7 +46,8 @@ void DataCollector::run(const Config& cfg) {
               << " @ " << cfg.fps << "fps"
               << "  duration=" << cfg.durationSec << "s"
               << "  depth=" << (cfg.useDepth ? "on" : "off")
-              << "  color=" << (cfg.useColor ? "on" : "off") << std::endl;
+              << "  color=" << (cfg.useColor ? "on" : "off")
+              << "  trigger=" << cfg.triggerHz << "Hz" << std::endl;
 
     enumerateDevices();
     configureSyncMode();
@@ -67,6 +88,11 @@ void DataCollector::enumerateDevices() {
                   << std::endl;
         auto syncBitmap = dev->getSupportedMultiDeviceSyncModeBitmap();
         std::cout << "  Supported sync modes: 0x" << std::hex << syncBitmap << std::dec << std::endl;
+
+        // 检查是否支持全局时间戳(global timestamp)——用于跨设备时钟对齐
+        bool globalTsSupported = dev->isGlobalTimestampSupported();
+        std::cout << "  Global timestamp supported: " << (globalTsSupported ? "YES" : "NO") << std::endl;
+
         devices_.push_back(dev);
     }
 
@@ -94,13 +120,13 @@ void DataCollector::configureSyncMode() {
         cfg.framesPerTrigger     = 1;
         devices_[i]->setMultiDeviceSyncConfig(cfg);
 
-        // // Enable FPS boost in hardware trigger mode (OB_PROP_FPS_BOOST_BOOL = 275)
-        // // 仅对支持该属性的设备生效(如 Gemini 305g 不支持,跳过避免抛异常)
-        // bool fpsBoost = false;
-        // if (devices_[i]->isPropertySupported(OB_PROP_FPS_BOOST_BOOL, OB_PERMISSION_WRITE)) {
-        //     devices_[i]->setBoolProperty(OB_PROP_FPS_BOOST_BOOL, true);
-        //     fpsBoost = devices_[i]->getBoolProperty(OB_PROP_FPS_BOOST_BOOL);
-        // }
+        // Enable FPS boost in hardware trigger mode (OB_PROP_FPS_BOOST_BOOL = 275)
+        // 仅对支持该属性的设备生效(如 Gemini 305g 不支持,跳过避免抛异常)
+        bool fpsBoost = false;
+        if (devices_[i]->isPropertySupported(OB_PROP_FPS_BOOST_BOOL, OB_PERMISSION_WRITE)) {
+            devices_[i]->setBoolProperty(OB_PROP_FPS_BOOST_BOOL, true);
+            fpsBoost = devices_[i]->getBoolProperty(OB_PROP_FPS_BOOST_BOOL);
+        }
 
         auto sn = info->serialNumber();
         std::cout << "Device " << i << " (SN=" << sn
@@ -125,6 +151,18 @@ void DataCollector::resetTimestampAndSyncClock() {
         dev->timerSyncWithHost();
     }
     std::cout << "Per-device timer sync completed (" << devices_.size() << " devices)" << std::endl;
+
+    // 使能全局时间戳(global timestamp)：仅对支持的设备开启。
+    // 开启后 frame->globalTimeStampUs() 会返回换算到主机时钟域的时间戳，
+    // 可用于跨设备时间戳对齐(消除各相机本地晶振漂移)。
+    for (size_t i = 0; i < devices_.size(); i++) {
+        if (devices_[i]->isGlobalTimestampSupported()) {
+            devices_[i]->enableGlobalTimestamp(true);
+            std::cout << "Device " << i << ": global timestamp ENABLED" << std::endl;
+        } else {
+            std::cout << "Device " << i << ": global timestamp NOT supported, skip enable" << std::endl;
+        }
+    }
 }
 
 // 把 color 帧转换为 cv::Mat(BGR)，格式转换逻辑参考官方示例
@@ -232,6 +270,8 @@ void DataCollector::collectFrames(const Config& cfg) {
         std::cout << "Image saving enabled -> " << outputDir_ << std::endl;
     }
 
+    std::vector<std::shared_ptr<ob::Config>> streamCfgs(deviceCount);
+
     for (int i = 0; i < deviceCount; i++) {
         pipelines_[i] = std::make_shared<ob::Pipeline>(devices_[i]);
         auto streamCfg = std::make_shared<ob::Config>();
@@ -245,53 +285,96 @@ void DataCollector::collectFrames(const Config& cfg) {
                 static_cast<int>(cfg.width), static_cast<int>(cfg.height),
                 static_cast<int>(cfg.fps), OB_FORMAT_YUYV);
 
-        int camIndex = i;
-        pipelines_[i]->start(streamCfg, [this, camIndex, cfg](std::shared_ptr<ob::FrameSet> frameSet) {
-            auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+        streamCfgs[i] = streamCfg;
+    }
 
-            if (cfg.useDepth) {
-                auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
-                if (depthFrame) {
-                    FrameStamp fs;
-                    fs.hwTimestampUs     = depthFrame->timeStampUs();
-                    fs.globalTimestampUs = depthFrame->globalTimeStampUs();
-                    fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
-                    fs.frameNumber       = 0; // 时间戳已包含足够信息
-                    fs.deviceIndex       = camIndex;
-                    fs.streamType        = StreamType::DEPTH;
-                    std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
-                    allFrames_[camIndex][0].push_back(fs);
+    // 外部触发自动控制: 先关触发, 确保三台相机从"无触发"状态一起 arm
+    if (cfg.triggerHz > 0) {
+        writeTriggerFramerate(0);
+    }
+
+    // ---- 阶段2: 3 线程 + 主线程发令枪, 同时 start ----
+    // 数据采集本身无共享写(每台相机写自己的 allFrames_[i][0/1]), 故不加数据锁;
+    // 下面这对 mutex + condition_variable 仅用于"发令枪"通知, 不保护数据。
+    {
+        std::mutex              goMutex;
+        std::condition_variable goCv;
+        bool                    go = false;
+        std::vector<std::exception_ptr> errs(deviceCount);
+
+        std::vector<std::thread> startThreads;
+        startThreads.reserve(deviceCount);
+        for (int i = 0; i < deviceCount; i++) {
+            int camIndex = i;
+            startThreads.emplace_back([this, camIndex, cfg, &streamCfgs, &goMutex, &goCv, &go, &errs]() {
+                try {
+                    std::unique_lock<std::mutex> lock(goMutex);
+                    goCv.wait(lock, [&go] { return go; });
+                    pipelines_[camIndex]->start(streamCfgs[camIndex],
+                        [this, camIndex](std::shared_ptr<ob::FrameSet> frameSet) {
+                            auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
+                            if (depthFrame) {
+                                FrameStamp fs;
+                                fs.hwTimestampUs     = depthFrame->timeStampUs();
+                                fs.globalTimestampUs = depthFrame->globalTimeStampUs();
+                                fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
+                                fs.frameNumber       = 0; // 时间戳已包含足够信息
+                                fs.deviceIndex       = camIndex;
+                                fs.streamType        = StreamType::DEPTH;
+                                std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
+                                allFrames_[camIndex][0].push_back(fs);
+                            }
+
+                            auto colorFrame = frameSet->getFrame(OB_FRAME_COLOR);
+                            if (colorFrame) {
+                                FrameStamp fs;
+                                fs.hwTimestampUs     = colorFrame->timeStampUs();
+                                fs.globalTimestampUs = colorFrame->globalTimeStampUs();
+                                fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
+                                fs.frameNumber       = 0;
+                                fs.deviceIndex       = camIndex;
+                                fs.streamType        = StreamType::COLOR;
+                                {
+                                    std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
+                                    allFrames_[camIndex][1].push_back(fs);
+                                }
+                                if (!outputDir_.empty()) {
+                                    saveColorImage(colorFrame, camIndex);
+                                }
+                            }
+                        });
+
+                    auto sn = devices_[camIndex]->getDeviceInfo()->serialNumber();
+                    std::cout << "Device " << camIndex << " (SN=" << sn << ") pipeline started: "
+                              << (cfg.useDepth ? "Depth " : "")
+                              << (cfg.useColor ? "Color " : "")
+                              << cfg.width << "x" << cfg.height << " @ " << cfg.fps << "fps"
+                              << std::endl;
+                } catch (...) {
+                    errs[camIndex] = std::current_exception();
                 }
-            }
+            });
+        }
 
-            if (cfg.useColor) {
-                auto colorFrame = frameSet->getFrame(OB_FRAME_COLOR);
-                if (colorFrame) {
-                    FrameStamp fs;
-                    fs.hwTimestampUs     = colorFrame->timeStampUs();
-                    fs.globalTimestampUs = colorFrame->globalTimeStampUs();
-                    fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
-                    fs.frameNumber       = 0;
-                    fs.deviceIndex       = camIndex;
-                    fs.streamType        = StreamType::COLOR;
-                    {
-                        std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
-                        allFrames_[camIndex][1].push_back(fs);
-                    }
-                    // 保存 color 图像到文件（输出目录非空时）
-                    if (!outputDir_.empty()) {
-                        saveColorImage(colorFrame, camIndex);
-                    }
-                }
-            }
-        });
+        // 发令枪: 所有线程已就位等待, 统一放行
+        {
+            std::lock_guard<std::mutex> lock(goMutex);
+            go = true;
+        }
+        goCv.notify_all();
 
-        auto sn = devices_[i]->getDeviceInfo()->serialNumber();
-        std::cout << "Device " << i << " (SN=" << sn << ") pipeline started: "
-                  << (cfg.useDepth ? "Depth " : "")
-                  << (cfg.useColor ? "Color " : "")
-                  << cfg.width << "x" << cfg.height << " @ " << cfg.fps << "fps" << std::endl;
+        for (auto& t : startThreads) {
+            t.join();
+        }
+        for (auto& e : errs) {
+            if (e) std::rethrow_exception(e);
+        }
+    }
+
+    // 三台已 arm 就绪。短暂 settle 后开启触发 —— 此刻是"发令枪", 三台从同一触发沿出帧
+    if (cfg.triggerHz > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        writeTriggerFramerate(static_cast<int>(cfg.triggerHz));
     }
 
     std::cout << "\nCollecting frames for " << cfg.durationSec
@@ -306,6 +389,9 @@ void DataCollector::collectFrames(const Config& cfg) {
 
     for (int i = deviceCount - 1; i >= 0; i--) {
         pipelines_[i]->stop();
+    }
+    if (cfg.triggerHz > 0) {
+        writeTriggerFramerate(0);
     }
     std::cout << "Pipelines stopped" << std::endl;
 

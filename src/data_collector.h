@@ -6,6 +6,7 @@
 #include "frame_stamp.h"
 #include <libobsensor/ObSensor.hpp>
 #include <atomic>
+#include <condition_variable>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -21,6 +22,7 @@ public:
         int64_t  fps         = 30;
         bool     useDepth    = true;
         bool     useColor    = true;
+        int64_t  triggerHz   = 0;    // >0 时程序自动写 /sys/kernel/debug/gpio_trigger/framerate 控制外部触发
         std::string outputDir;   // 非空则把采集到的 color 帧保存为 PNG + 写 timestamps.csv
     };
 
