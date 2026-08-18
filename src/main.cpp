@@ -28,6 +28,7 @@ static void printUsage(const char* prog) {
               << "  --fps=N             Stream frame rate (default: 30)\n"
               << "  --width=N           Stream width (default: 848)\n"
               << "  --height=N          Stream height (default: 480)\n"
+              << "  --trigger-hz=N      Auto-control external PWM trigger at N Hz (0=off, default: 0)\n"
               << "  --hw-threshold=N    HW timestamp pairing threshold in us (default: 500)\n"
               << "  --no-depth          Disable depth stream\n"
               << "  --no-color          Disable color stream\n"
@@ -75,6 +76,7 @@ int main(int argc, char* argv[]) {
             if (parseArg(arg, "--fps=",           dcCfg.fps))           continue;
             if (parseArg(arg, "--width=",         dcCfg.width))         continue;
             if (parseArg(arg, "--height=",        dcCfg.height))        continue;
+            if (parseArg(arg, "--trigger-hz=",    dcCfg.triggerHz))     continue;
             if (parseArg(arg, "--hw-threshold=",  saCfg.hwThresholdUs)) continue;
             if (parseArg(arg, "--outdir=",        dcCfg.outputDir))     continue;
             if (parseArg(arg, "--raw-csv=",       rawCsvPath))          continue;
@@ -95,7 +97,8 @@ int main(int argc, char* argv[]) {
                   << "  fps=" << dcCfg.fps
                   << "  duration=" << dcCfg.durationSec << "s"
                   << "  depth=" << (dcCfg.useDepth ? "on" : "off")
-                  << "  color=" << (dcCfg.useColor ? "on" : "off") << std::endl;
+                  << "  color=" << (dcCfg.useColor ? "on" : "off")
+                  << "  trigger=" << dcCfg.triggerHz << "Hz" << std::endl;
         std::cout << "  hw-threshold=" << saCfg.hwThresholdUs << "us"
                   << "  csv=" << csvPath << std::endl;
         std::cout << "  outdir=" << (dcCfg.outputDir.empty() ? "(off)" : dcCfg.outputDir) << std::endl;
