@@ -70,4 +70,6 @@ private:
     std::mutex              csvMutex_;       // 保护 csvFile_ 与 globalSeq_
     std::vector<int>        savedCount_;     // [deviceIndex] 已保存的帧序号
     int                     globalSeq_ = 0;  // 全局帧序号 (作为 groupId)
+    std::atomic<bool>       savingEnabled_{true};    // 预热阶段临时置 false, color 帧只入内存不落盘; 预热完成后恢复 true
+    std::atomic<bool>       recordingEnabled_{true}; // 收尾冻结: false 时回调直接返回, 不再计数/落盘, 用于 stop 前冻结帧数
 };

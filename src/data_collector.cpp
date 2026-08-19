@@ -217,6 +217,7 @@ static cv::Mat frameToMatColor(const std::shared_ptr<ob::Frame>& frame) {
 }
 
 void DataCollector::saveColorImage(const std::shared_ptr<ob::Frame>& colorFrame, int camIndex) {
+    if (!savingEnabled_) return;  // 预热阶段不落盘, 避免垃圾帧污染 PNG/CSV
     cv::Mat mat = frameToMatColor(colorFrame);
     if (mat.empty()) return;
 
@@ -243,6 +244,8 @@ void DataCollector::saveColorImage(const std::shared_ptr<ob::Frame>& colorFrame,
 
 void DataCollector::collectFrames(const Config& cfg) {
     int deviceCount = static_cast<int>(devices_.size());
+
+    recordingEnabled_ = true;  // 每次采集前复位(收尾会置 false)
 
     pipelines_.resize(deviceCount);
     allFrames_.resize(deviceCount);
@@ -312,18 +315,8 @@ void DataCollector::collectFrames(const Config& cfg) {
                     goCv.wait(lock, [&go] { return go; });
                     pipelines_[camIndex]->start(streamCfgs[camIndex],
                         [this, camIndex](std::shared_ptr<ob::FrameSet> frameSet) {
-                            auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
-                            if (depthFrame) {
-                                FrameStamp fs;
-                                fs.hwTimestampUs     = depthFrame->timeStampUs();
-                                fs.globalTimestampUs = depthFrame->globalTimeStampUs();
-                                fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
-                                fs.frameNumber       = 0; // 时间戳已包含足够信息
-                                fs.deviceIndex       = camIndex;
-                                fs.streamType        = StreamType::DEPTH;
-                                std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
-                                allFrames_[camIndex][0].push_back(fs);
-                            }
+                            
+                            if (!recordingEnabled_.load()) return;  // 收尾冻结后直接丢弃新帧
 
                             auto colorFrame = frameSet->getFrame(OB_FRAME_COLOR);
                             if (colorFrame) {
@@ -341,6 +334,19 @@ void DataCollector::collectFrames(const Config& cfg) {
                                 if (!outputDir_.empty()) {
                                     saveColorImage(colorFrame, camIndex);
                                 }
+                            }
+
+                            auto depthFrame = frameSet->getFrame(OB_FRAME_DEPTH);
+                            if (depthFrame) {
+                                FrameStamp fs;
+                                fs.hwTimestampUs     = depthFrame->timeStampUs();
+                                fs.globalTimestampUs = depthFrame->globalTimeStampUs();
+                                fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
+                                fs.frameNumber       = 0; // 时间戳已包含足够信息
+                                fs.deviceIndex       = camIndex;
+                                fs.streamType        = StreamType::DEPTH;
+                                std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
+                                allFrames_[camIndex][0].push_back(fs);
                             }
                         });
 
@@ -373,8 +379,46 @@ void DataCollector::collectFrames(const Config& cfg) {
 
     // 三台已 arm 就绪。短暂 settle 后开启触发 —— 此刻是"发令枪", 三台从同一触发沿出帧
     if (cfg.triggerHz > 0) {
+        // 本次会做 color 预热: 先禁止落盘, 预热结束(清空预热帧)时再恢复, 避免垃圾帧写入 PNG/CSV
+        if (cfg.useColor) savingEnabled_ = false;
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         writeTriggerFramerate(static_cast<int>(cfg.triggerHz));
+    }
+
+    // 预热: color 传感器冷启动需约 300~400ms 跑完自动曝光/白平衡, 这期间不出帧,
+    // 导致 color 比 depth 固定少 3~4 帧(实测 raw.csv 首帧差 294~393ms, 中间无丢帧)。
+    // 固定 sleep(500ms) 太临界且靠猜时间; 这里改为"条件等待": 轮询每台设备 color
+    // 是否已各收到 >= WARMUP_MIN_COLOR 帧(即已稳定出帧), 收到后统一清空预热帧再开落盘,
+    // 使 depth 与 color 从同一干净起点计数。兜底最多等 WARMUP_TIMEOUT_MS, 超时也清空开始。
+    if (cfg.useColor && cfg.triggerHz > 0) {
+        const int  WARMUP_MIN_COLOR = 3;
+        const auto WARMUP_TIMEOUT  = std::chrono::milliseconds(2000);
+
+        auto colorReady = [&]() {
+            for (int i = 0; i < deviceCount; i++) {
+                std::lock_guard<std::mutex> lock(*mutexes_[i][1]);
+                if (static_cast<int>(allFrames_[i][1].size()) < WARMUP_MIN_COLOR) return false;
+            }
+            return true;
+        };
+
+        auto warmupStart = std::chrono::steady_clock::now();
+        while (!colorReady() &&
+               std::chrono::steady_clock::now() - warmupStart < WARMUP_TIMEOUT) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // 清空预热阶段积累的所有帧(含 depth), 让 depth 与 color 从同一干净起点开始
+        for (int i = 0; i < deviceCount; i++) {
+            for (int j = 0; j < 2; j++) {
+                std::lock_guard<std::mutex> lock(*mutexes_[i][j]);
+                allFrames_[i][j].clear();
+            }
+        }
+
+        // 预热结束, 之后 color 帧正常落盘(PNG + CSV 从 groupId=0 / seq=0 干净起步)
+        savingEnabled_ = true;
+        std::cout << "[WARMUP] color ready (or timeout), pre-trigger frames cleared" << std::endl;
     }
 
     std::cout << "\nCollecting frames for " << cfg.durationSec
@@ -387,13 +431,24 @@ void DataCollector::collectFrames(const Config& cfg) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    // ---- 收尾: 先冻结计数, 再在触发仍开时逐台 stop, 最后关触发 ----
+    // 1) 冻结计数: recordingEnabled_=false 后回调直接丢弃新帧, 不再 push_back/落盘,
+    //    因此 stop 期间即使触发仍在跑、相机仍出帧, 帧数也不会漂移(对应原 104/101/98 问题)。
+    // 2) 触发仍开时 stop: 若先关触发再 stop, 收流通道等不到下一帧, 2.5s 超时后触发
+    //    tegra_camera 驱动的 use-after-free bug, 板子 panic 重启(见 pstore 日志)。
+    //    触发开着时 stop(), 收帧线程有帧可收, 能正常返回并发出 STREAMOFF, 通道干净关闭。
+    // 3) 全部 stop 完成(通道已关)后再关触发, 不会再出现饿死/超时。
+    recordingEnabled_ = false;
+
     for (int i = deviceCount - 1; i >= 0; i--) {
+        std::cout << "Stopping pipeline " << i << " ..." << std::endl;
         pipelines_[i]->stop();
+        std::cout << "Pipeline " << i << " stopped" << std::endl;
     }
+
     if (cfg.triggerHz > 0) {
         writeTriggerFramerate(0);
     }
-    std::cout << "Pipelines stopped" << std::endl;
 
     if (!outputDir_.empty()) {
         if (csvFile_.is_open()) {
