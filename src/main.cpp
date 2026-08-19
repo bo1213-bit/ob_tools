@@ -14,11 +14,13 @@
 
 static DataCollector* g_collector = nullptr;
 
-static void signalHandler(int /*signum*/) {
-    std::cout << "\n[INFO] Received signal, shutting down..." << std::endl;
+static void signalHandler(int signum) {
+    std::cout << "\n[INFO] Received signal, shutting down... (Ctrl+C again to force quit)" << std::endl;
     if (g_collector) {
         g_collector->stop();
     }
+    // 恢复默认处理: 若 SDK 的 stop() 阻塞卡死, 第二次 Ctrl+C 直接终止进程
+    std::signal(signum, SIG_DFL);
 }
 
 static void printUsage(const char* prog) {

@@ -14,7 +14,7 @@
 class SyncAnalyzer {
 public:
     struct Config {
-        int64_t hwThresholdUs = 2000;  // 硬件时间戳配对阈值 (us)
+        int64_t hwThresholdUs = 1000;  // 硬件时间戳配对阈值 (us)
     };
 
     struct PairStats {
