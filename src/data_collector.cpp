@@ -221,24 +221,54 @@ void DataCollector::saveColorImage(const std::shared_ptr<ob::Frame>& colorFrame,
     cv::Mat mat = frameToMatColor(colorFrame);
     if (mat.empty()) return;
 
-    int seq;
+    PendingImage img;
+    img.mat = std::move(mat);
+
     {
         std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
-        seq = savedCount_[camIndex]++;
+        int seq = savedCount_[camIndex]++;
+        uint64_t ts = colorFrame->timeStampUs();
+        char fname[128];
+        std::snprintf(fname, sizeof(fname), "Device%d_frame_%06d_%llu.png", camIndex, seq,
+                      static_cast<unsigned long long>(ts));
+        img.fname = fname;
+        img.deviceIndex = camIndex;
+        img.deviceTimestampUs = ts;
     }
-
-    uint64_t ts = colorFrame->timeStampUs();
-    char fname[128];
-    std::snprintf(fname, sizeof(fname), "Device%d_frame_%06d_%llu.png", camIndex, seq,
-                  static_cast<unsigned long long>(ts));
-
-    cv::imwrite(outputDir_ + "/" + fname, mat);
-
     {
         std::lock_guard<std::mutex> lock(csvMutex_);
-        csvFile_ << globalSeq_++ << "," << camIndex << ","
-                 << devices_[camIndex]->getDeviceInfo()->serialNumber() << "," << ts << "," << fname << "\n";
-        csvFile_.flush();
+        img.groupId = globalSeq_++;
+        img.deviceSN = devices_[camIndex]->getDeviceInfo()->serialNumber();
+    }
+
+    // 慢 I/O(imwrite + CSV flush) 交给后台线程, 这里只入队, 保证回调线程不被阻塞
+    {
+        std::lock_guard<std::mutex> lock(imageQueueMutex_);
+        imageQueue_.push(std::move(img));
+    }
+    imageQueueCv_.notify_one();
+}
+
+void DataCollector::writerLoop() {
+    std::unique_lock<std::mutex> lock(imageQueueMutex_);
+    while (true) {
+        imageQueueCv_.wait(lock, [this] { return !imageQueue_.empty() || !writerRunning_.load(); });
+        while (!imageQueue_.empty()) {
+            PendingImage img = std::move(imageQueue_.front());
+            imageQueue_.pop();
+            lock.unlock();
+
+            cv::imwrite(outputDir_ + "/" + img.fname, img.mat);
+            {
+                std::lock_guard<std::mutex> csvLock(csvMutex_);
+                csvFile_ << img.groupId << "," << img.deviceIndex << ","
+                         << img.deviceSN << "," << img.deviceTimestampUs << "," << img.fname << "\n";
+                csvFile_.flush();
+            }
+
+            lock.lock();
+        }
+        if (!writerRunning_.load()) break;
     }
 }
 
@@ -270,6 +300,9 @@ void DataCollector::collectFrames(const Config& cfg) {
             std::cerr << "[WARN] cannot open timestamps.csv in " << outputDir_ << std::endl;
         }
         savedCount_.assign(deviceCount, 0);
+        // 启动后台写盘线程: 慢 I/O(imwrite/CSV flush) 移出回调线程, 避免阻塞 SDK 收帧导致丢帧
+        writerRunning_ = true;
+        writerThread_ = std::thread(&DataCollector::writerLoop, this);
         std::cout << "Image saving enabled -> " << outputDir_ << std::endl;
     }
 
@@ -324,7 +357,7 @@ void DataCollector::collectFrames(const Config& cfg) {
                                 fs.hwTimestampUs     = colorFrame->timeStampUs();
                                 fs.globalTimestampUs = colorFrame->globalTimeStampUs();
                                 fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
-                                fs.frameNumber       = 0;
+                                fs.frameNumber       = static_cast<int64_t>(colorFrame->getIndex()); // SDK 每流递增帧序号
                                 fs.deviceIndex       = camIndex;
                                 fs.streamType        = StreamType::COLOR;
                                 {
@@ -342,7 +375,7 @@ void DataCollector::collectFrames(const Config& cfg) {
                                 fs.hwTimestampUs     = depthFrame->timeStampUs();
                                 fs.globalTimestampUs = depthFrame->globalTimeStampUs();
                                 fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
-                                fs.frameNumber       = 0; // 时间戳已包含足够信息
+                                fs.frameNumber       = static_cast<int64_t>(depthFrame->getIndex()); // SDK 每流递增帧序号
                                 fs.deviceIndex       = camIndex;
                                 fs.streamType        = StreamType::DEPTH;
                                 std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
@@ -451,6 +484,14 @@ void DataCollector::collectFrames(const Config& cfg) {
     }
 
     if (!outputDir_.empty()) {
+        // 停止后台写盘线程: 置停止标志 → 唤醒 → 等待队列清空并退出, 再关 CSV
+        {
+            std::lock_guard<std::mutex> lock(imageQueueMutex_);
+            writerRunning_ = false;
+        }
+        imageQueueCv_.notify_all();
+        if (writerThread_.joinable()) writerThread_.join();
+
         if (csvFile_.is_open()) {
             csvFile_.close();
         }
@@ -479,7 +520,7 @@ void DataCollector::exportRawCSV(const std::string& path) const {
         std::cerr << "[WARN] cannot open raw CSV: " << path << std::endl;
         return;
     }
-    f << "deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs\n";
+    f << "deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs,frameNumber\n";
     int count = 0;
     for (size_t i = 0; i < allFrames_.size(); i++) {
         for (size_t s = 0; s < allFrames_[i].size(); s++) {
@@ -488,7 +529,8 @@ void DataCollector::exportRawCSV(const std::string& path) const {
                   << (fs.streamType == StreamType::DEPTH ? "DEPTH" : "COLOR") << ","
                   << fs.hwTimestampUs << ","
                   << fs.globalTimestampUs << ","
-                  << fs.sysTimestampUs << "\n";
+                  << fs.sysTimestampUs << ","
+                  << fs.frameNumber << "\n";
                 count++;
             }
         }
