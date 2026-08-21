@@ -5,12 +5,15 @@
 
 #include "frame_stamp.h"
 #include <libobsensor/ObSensor.hpp>
+#include <opencv2/core.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 
 class DataCollector {
@@ -53,6 +56,19 @@ private:
     // 把 color 帧保存为 PNG 并写入 timestamps.csv（outputDir_ 非空时由回调调用）
     void saveColorImage(const std::shared_ptr<ob::Frame>& colorFrame, int camIndex);
 
+    // 后台写盘线程主体: 从 imageQueue_ 取图, 执行 imwrite + 写 timestamps.csv
+    // (慢 I/O 移出回调线程, 避免阻塞 SDK 收帧导致丢帧)
+    void writerLoop();
+
+    struct PendingImage {
+        std::string fname;
+        cv::Mat     mat;
+        int         groupId;
+        int         deviceIndex;
+        std::string deviceSN;
+        uint64_t    deviceTimestampUs;
+    };
+
     // 成员变量
     std::shared_ptr<ob::Context>                           context_;
     std::vector<std::shared_ptr<ob::Device>>               devices_;
@@ -72,4 +88,11 @@ private:
     int                     globalSeq_ = 0;  // 全局帧序号 (作为 groupId)
     std::atomic<bool>       savingEnabled_{true};    // 预热阶段临时置 false, color 帧只入内存不落盘; 预热完成后恢复 true
     std::atomic<bool>       recordingEnabled_{true}; // 收尾冻结: false 时回调直接返回, 不再计数/落盘, 用于 stop 前冻结帧数
+
+    // ---- 后台写盘(慢 I/O 移出回调线程) ----
+    std::queue<PendingImage> imageQueue_;         // 待落盘图片队列
+    std::mutex               imageQueueMutex_;   // 保护 imageQueue_
+    std::condition_variable  imageQueueCv_;      // 唤醒后台写盘线程
+    std::thread              writerThread_;      // 后台写盘线程
+    std::atomic<bool>        writerRunning_{false}; // 后台线程运行标志
 };
