@@ -1,0 +1,82 @@
+{
+    "devices": [
+        {
+            "sn": "CV3T561000B5",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            },
+            "streamConfig": {
+                "depth": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_Y16"
+                },
+                "color": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_MJPG"
+                }
+            }
+        },
+        {
+            "sn": "CV3T561000H0",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            },
+            "streamConfig": {
+                "depth": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_Y16"
+                },
+                "color": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_MJPG"
+                }
+            }
+        },
+	{
+            "sn": "CPBG1630011D",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            },
+            "streamConfig": {
+                "depth": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_Y16"
+                },
+                "color": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_MJPG"
+                }
+            }
+        }
+    ]
+}

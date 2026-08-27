@@ -81,9 +81,15 @@ private:
         const std::vector<int64_t>& sysDiffs
     );
 
-    // 多设备最近邻唯一匹配: 所有设备同一流类型 → 每组 max(hw)-min(hw)
+    // 多设备匹配原始 diff: hw = max(hw)-min(hw) (参考), global = max(global)-min(global) (同步精度)
+    struct MultiDeviceDiffs {
+        std::vector<int64_t> hw;
+        std::vector<int64_t> global;
+    };
+
+    // 多设备最近邻唯一匹配: 所有设备同一流类型 → 每组 max-min
     // 以帧数最少的设备为基准，每帧在其余设备中找最近且未匹配的帧
-    std::vector<int64_t> multiDeviceMatch(
+    MultiDeviceDiffs multiDeviceMatch(
         const std::vector<std::vector<FrameStamp>>& allDevFrames,
         int64_t hwThresholdUs
     );
@@ -98,9 +104,9 @@ private:
     MultiDeviceStats       multiDeviceDepthStats_;  // 多设备同步 Depth
     MultiDeviceStats       multiDeviceColorStats_;  // 多设备同步 Color
 
-    // 多设备匹配原始 diff (用于 CSV)
-    std::vector<int64_t> multiDeviceDepthDiffs_;
-    std::vector<int64_t> multiDeviceColorDiffs_;
+    // 多设备匹配原始 diff (用于 CSV): hw 参考 / global 同步精度
+    MultiDeviceDiffs       multiDeviceDepthDiffs_;
+    MultiDeviceDiffs       multiDeviceColorDiffs_;
 
     // 原始 diff 数据 (用于 CSV 导出)
     struct DiffRecord {

@@ -55,18 +55,18 @@ SyncAnalyzer::matchAndDiff(
     return {matchDiffs, sysDiffs, timestamps, hwDiffs, aIndices, bIndices};
 }
 
-std::vector<int64_t> SyncAnalyzer::multiDeviceMatch(
+SyncAnalyzer::MultiDeviceDiffs SyncAnalyzer::multiDeviceMatch(
     const std::vector<std::vector<FrameStamp>>& allDevFrames,
     int64_t hwThresholdUs)
 {
-    std::vector<int64_t> diffs;
+    MultiDeviceDiffs result;
 
     // Need at least 2 devices with frames
     std::vector<int> validDevs;
     for (int i = 0; i < static_cast<int>(allDevFrames.size()); i++) {
         if (!allDevFrames[i].empty()) validDevs.push_back(i);
     }
-    if (validDevs.size() < 2) return diffs;
+    if (validDevs.size() < 2) return result;
 
     // Pick reference device = fewest frames
     int refDev = validDevs[0];
@@ -80,7 +80,7 @@ std::vector<int64_t> SyncAnalyzer::multiDeviceMatch(
         if (d != refDev) otherDevs.push_back(d);
     }
 
-    // Pre-extract timestamps: globalTimestampUs for matching, hwTimestampUs for diff
+    // Pre-extract timestamps: globalTimestampUs for matching, hwTimestampUs for reference diff
     std::vector<std::vector<int64_t>> globalTs(allDevFrames.size());
     std::vector<std::vector<int64_t>> hwTs(allDevFrames.size());
     for (int d : validDevs) {
@@ -98,6 +98,7 @@ std::vector<int64_t> SyncAnalyzer::multiDeviceMatch(
         // Match on globalTimestampUs (host-synced, consistent across devices)
         int64_t refGlobalTime = refGlobal[ri];
         std::vector<int64_t> groupHw = {refHw[ri]};
+        std::vector<int64_t> groupGlobal = {refGlobal[ri]};
         bool allMatched = true;
 
         for (int d : otherDevs) {
@@ -118,17 +119,20 @@ std::vector<int64_t> SyncAnalyzer::multiDeviceMatch(
                 allMatched = false;
                 break;
             }
-            // Use hwTimestampUs for the actual sync precision metric
+            // global 用于同步精度, hw 保留作参考
             groupHw.push_back(hArr[bestIdx]);
+            groupGlobal.push_back(gArr[bestIdx]);
         }
 
         if (allMatched) {
-            auto [minIt, maxIt] = std::minmax_element(groupHw.begin(), groupHw.end());
-            diffs.push_back(*maxIt - *minIt);
+            auto [hminIt, hmaxIt] = std::minmax_element(groupHw.begin(), groupHw.end());
+            result.hw.push_back(*hmaxIt - *hminIt);
+            auto [gminIt, gmaxIt] = std::minmax_element(groupGlobal.begin(), groupGlobal.end());
+            result.global.push_back(*gmaxIt - *gminIt);
         }
     }
 
-    return diffs;
+    return result;
 }
 
 SyncAnalyzer::PairStats
@@ -184,58 +188,56 @@ void SyncAnalyzer::run(
     const int DEPTH_IDX = static_cast<int>(StreamType::DEPTH);
     const int COLOR_IDX = static_cast<int>(StreamType::COLOR);
 
-    // 1. 同设备跨流: Depth vs Color
+    // 1. 同设备跨流: Depth vs Color (用 globalTimestampUs 匹配, 差值报告 global)
     for (int i = 0; i < deviceCount; i++) {
         if (frames[i][DEPTH_IDX].empty() || frames[i][COLOR_IDX].empty()) continue;
 
-        auto [matchDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
-            frames[i][DEPTH_IDX], frames[i][COLOR_IDX], cfg.hwThresholdUs);
+        auto [globalDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
+            frames[i][DEPTH_IDX], frames[i][COLOR_IDX], cfg.hwThresholdUs, true);
 
-        auto stats = computeStats(i, i, StreamType::DEPTH, true, hwDiffs, sysDiffs);
+        auto stats = computeStats(i, i, StreamType::DEPTH, true, globalDiffs, sysDiffs);
         crossStreamStats_.push_back(stats);
 
-        for (size_t k = 0; k < hwDiffs.size(); k++) {
-            int64_t globalDiff = frames[i][DEPTH_IDX][aIdx[k]].globalTimestampUs
-                               - frames[i][COLOR_IDX][bIdx[k]].globalTimestampUs;
-            allDiffs_.push_back({"cross_stream", i, i, "depth+color", hwDiffs[k], globalDiff, sysDiffs[k], timestamps[k]});
+        for (size_t k = 0; k < globalDiffs.size(); k++) {
+            allDiffs_.push_back({"cross_stream", i, i, "depth+color", hwDiffs[k], globalDiffs[k], sysDiffs[k], timestamps[k]});
         }
     }
 
-    // 2. 跨设备同流 Depth (使用 globalTimestampUs 匹配)
+    // 2. 跨设备同流 Depth (使用 globalTimestampUs 匹配, 差值报告 global)
     for (int i = 0; i < deviceCount; i++) {
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][DEPTH_IDX].empty() || frames[j][DEPTH_IDX].empty()) continue;
 
-            auto [timeDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
+            auto [globalDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
                 frames[i][DEPTH_IDX], frames[j][DEPTH_IDX], cfg.hwThresholdUs, true);
 
-            auto stats = computeStats(i, j, StreamType::DEPTH, false, hwDiffs, sysDiffs);
+            auto stats = computeStats(i, j, StreamType::DEPTH, false, globalDiffs, sysDiffs);
             crossDeviceDepthStats_.push_back(stats);
 
-            for (size_t k = 0; k < timeDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], timeDiffs[k], sysDiffs[k], timestamps[k]});
+            for (size_t k = 0; k < globalDiffs.size(); k++) {
+                allDiffs_.push_back({"cross_device", i, j, "depth", hwDiffs[k], globalDiffs[k], sysDiffs[k], timestamps[k]});
             }
         }
     }
 
-    // 3. 跨设备同流 Color (使用 globalTimestampUs 匹配)
+    // 3. 跨设备同流 Color (使用 globalTimestampUs 匹配, 差值报告 global)
     for (int i = 0; i < deviceCount; i++) {
         for (int j = i + 1; j < deviceCount; j++) {
             if (frames[i][COLOR_IDX].empty() || frames[j][COLOR_IDX].empty()) continue;
 
-            auto [timeDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
+            auto [globalDiffs, sysDiffs, timestamps, hwDiffs, aIdx, bIdx] = matchAndDiff(
                 frames[i][COLOR_IDX], frames[j][COLOR_IDX], cfg.hwThresholdUs, true);
 
-            auto stats = computeStats(i, j, StreamType::COLOR, false, hwDiffs, sysDiffs);
+            auto stats = computeStats(i, j, StreamType::COLOR, false, globalDiffs, sysDiffs);
             crossDeviceColorStats_.push_back(stats);
 
-            for (size_t k = 0; k < timeDiffs.size(); k++) {
-                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], timeDiffs[k], sysDiffs[k], timestamps[k]});
+            for (size_t k = 0; k < globalDiffs.size(); k++) {
+                allDiffs_.push_back({"cross_device", i, j, "color", hwDiffs[k], globalDiffs[k], sysDiffs[k], timestamps[k]});
             }
         }
     }
 
-    // 4. 多设备同步精度: 所有设备同一流类型, 匹配后 max(hw)-min(hw)
+    // 4. 多设备同步精度: 所有设备同一流类型, 匹配后 max(global)-min(global)
     {
         // Depth
         std::vector<std::vector<FrameStamp>> depthFrames(deviceCount);
@@ -264,10 +266,11 @@ void SyncAnalyzer::run(
             s.hwStddevUs = std::sqrt(sqSum / diffs.size());
             return s;
         };
-        multiDeviceDepthStats_ = calcMdStats(multiDeviceDepthDiffs_, StreamType::DEPTH, deviceCount);
+        multiDeviceDepthStats_ = calcMdStats(multiDeviceDepthDiffs_.global, StreamType::DEPTH, deviceCount);
 
-        for (auto d : multiDeviceDepthDiffs_) {
-            allDiffs_.push_back({"multi_device", 0, 0, "depth_all", d, 0, 0, 0});
+        for (size_t k = 0; k < multiDeviceDepthDiffs_.global.size(); k++) {
+            allDiffs_.push_back({"multi_device", 0, 0, "depth_all",
+                                 multiDeviceDepthDiffs_.hw[k], multiDeviceDepthDiffs_.global[k], 0, 0});
         }
 
         // Color
@@ -276,10 +279,11 @@ void SyncAnalyzer::run(
             colorFrames[i] = frames[i][COLOR_IDX];
         }
         multiDeviceColorDiffs_ = multiDeviceMatch(colorFrames, cfg.hwThresholdUs);
-        multiDeviceColorStats_ = calcMdStats(multiDeviceColorDiffs_, StreamType::COLOR, deviceCount);
+        multiDeviceColorStats_ = calcMdStats(multiDeviceColorDiffs_.global, StreamType::COLOR, deviceCount);
 
-        for (auto d : multiDeviceColorDiffs_) {
-            allDiffs_.push_back({"multi_device", 0, 0, "color_all", d, 0, 0, 0});
+        for (size_t k = 0; k < multiDeviceColorDiffs_.global.size(); k++) {
+            allDiffs_.push_back({"multi_device", 0, 0, "color_all",
+                                 multiDeviceColorDiffs_.hw[k], multiDeviceColorDiffs_.global[k], 0, 0});
         }
     }
 }
@@ -305,7 +309,7 @@ void SyncAnalyzer::printOneStats(const PairStats& s) const {
         std::cout << "  Pair count: 0 (no matches within threshold)" << std::endl;
         return;
     }
-    std::cout << "  HW Timestamp Diff:" << std::endl;
+    std::cout << "  Global Timestamp Diff:" << std::endl;
     std::cout << "    Min=" << s.hwMinUs << "us  Max=" << s.hwMaxUs << "us"
               << "  Mean=" << std::fixed << std::setprecision(1) << s.hwMeanUs
               << "us  Stddev=" << s.hwStddevUs << "us" << std::endl;
@@ -356,7 +360,7 @@ void SyncAnalyzer::printReport() const {
             std::cout << "  " << label << " (" << s.deviceCount << " devices):" << std::endl;
             std::cout << "    Match groups: " << s.matchCount << std::endl;
             if (s.matchCount > 0) {
-                std::cout << "    max(hw)-min(hw): Min=" << s.hwMinUs << "us  Max=" << s.hwMaxUs << "us"
+                std::cout << "    max(global)-min(global): Min=" << s.hwMinUs << "us  Max=" << s.hwMaxUs << "us"
                           << "  Mean=" << std::fixed << std::setprecision(1) << s.hwMeanUs
                           << "us  Stddev=" << s.hwStddevUs << "us" << std::endl;
             }

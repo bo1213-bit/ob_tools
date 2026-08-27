@@ -1,0 +1,15 @@
+1.切换到root账户执行升级: sudo su, 输入密码:admin
+2.rm -Rf /lib/modules/5.15.148-rt-ms/updates/drivers/media/i2c/*g300.ko
+  rm -Rf /lib/modules/5.15.148-rt-ms/updates/drivers/media/i2c/*obc_max96712.ko
+  rm -Rf /lib/modules/5.15.148-rt-ms/updates/drivers/media/i2c/*d4xx*.ko
+3.tar zxvf N210a2-for-leju-obc-1216.tgz -C /
+4.修改extlinux.conf文件: vim /boot/extlinux/extlinux.conf 
+  改成这样
+  FDT /boot/dtb/ms-agx-orin-1826C-N210a2-obc-ir-nv.dtb
+5.保存: depmod -a;sync;sleep 2
+6.插上相机,掉电重启
+7.拉流工具：/home/user/OrbbecViewer_v2.9.3_202607160623_b7e38ef_linux_arm64/OrbbecViewer
+
+备注:
+1.相机插拔设备需要掉电(相机不支持带电热插拔)
+2.受固件限制,奥比305g的Color和IR_left不支持同时打开
