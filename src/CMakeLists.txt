@@ -4,8 +4,11 @@ project(ob_tools)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Orbbec SDK — relative to ~/ros2_ws/ob_tools_src/
-set(OrbbecSDK_DIR "${CMAKE_CURRENT_LIST_DIR}/../OrbbecSDK_v2.8.7_202606161335_ab8672c_linux_arm64/lib")
+# Orbbec SDK — 指向板子家目录下解压的 SDK（~/OrbbecSDK_v2.9.3_..._linux_arm64/lib）
+# 允许命令行 -DOrbbecSDK_DIR=/其他路径/lib 覆盖
+if(NOT OrbbecSDK_DIR)
+    set(OrbbecSDK_DIR "$ENV{HOME}/OrbbecSDK_v2.9.3_202607151523_2f6561c_linux_arm64/lib")
+endif()
 find_package(OrbbecSDK REQUIRED)
 
 # OpenCV — 用于把采集的帧保存为 PNG 图像

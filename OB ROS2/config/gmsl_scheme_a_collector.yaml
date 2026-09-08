@@ -1,0 +1,25 @@
+/**:
+  ros__parameters:
+    # Project-owned launch starts all three external-triggered GMSL cameras.
+    # Topic paths must match the actual output of three_gmsl_external_trigger.launch.py.
+    subscriptions:
+      - "camera_305_01|depth|/camera_305_01/depth/image_raw"
+      - "camera_305_01|color|/camera_305_01/color/image_raw"
+      - "camera_305_02|depth|/camera_305_02/depth/image_raw"
+      - "camera_305_02|color|/camera_305_02/color/image_raw"
+      - "camera_335lg_01|depth|/camera_335lg_01/depth/image_raw"
+      - "camera_335lg_01|color|/camera_335lg_01/color/image_raw"
+
+    # Parent directory; each run creates capture_YYYYmmdd_HHMMSS below it.
+    output_dir: "/tmp/ob_ros2_gmsl_capture"
+    duration_sec: 30
+    max_frames_per_stream: 0
+
+    # SensorDataQoS normally matches image drivers that publish best-effort.
+    qos_depth: 10
+    use_sensor_data_qos: true
+
+    # Raw bytes are stored unchanged as .bin only when this is true.
+    save_images: false
+    writer_queue_capacity: 64
+    flush_every_n_records: 1

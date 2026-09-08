@@ -1,0 +1,23 @@
+/**:
+  ros__parameters:
+    # The collector only subscribes. Start Orbbec cameras separately.
+    # Keep camera names and topics aligned with the actual Orbbec launch configuration.
+    subscriptions:
+      - "camera_01|depth|/camera_01/depth/image_raw"
+      - "camera_01|color|/camera_01/color/image_raw"
+      - "camera_02|depth|/camera_02/depth/image_raw"
+      - "camera_02|color|/camera_02/color/image_raw"
+
+    # Parent directory; each run creates capture_YYYYmmdd_HHMMSS below it.
+    output_dir: "/tmp/ob_ros2_capture"
+    duration_sec: 30
+    max_frames_per_stream: 0
+
+    # SensorDataQoS normally matches image drivers that publish best-effort.
+    qos_depth: 10
+    use_sensor_data_qos: true
+
+    # Raw bytes are stored unchanged as .bin only when this is true.
+    save_images: false
+    writer_queue_capacity: 64
+    flush_every_n_records: 1

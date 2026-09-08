@@ -1,9 +1,9 @@
 {
     "devices": [
         {
-            "sn": "CP2194200060",
+            "sn": "CPBG1630011D",
             "syncConfig": {
-                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_PRIMARY",
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
                 "depthDelayUs": 0,
                 "colorDelayUs": 0,
                 "trigger2ImageDelayUs": 0,
@@ -13,23 +13,23 @@
             },
             "streamConfig": {
                 "depth": {
-                    "width": 640,
-                    "height": 480,
+                    "width": 1280,
+                    "height": 800,
                     "fps": 30,
                     "format": "OB_FORMAT_Y16"
                 },
                 "color": {
-                    "width": 640,
-                    "height": 480,
+                    "width": 1280,
+                    "height": 800,
                     "fps": 30,
-                    "format": "OB_FORMAT_MJPG"
+                    "format": "OB_FORMAT_YUYV"
                 }
             }
         },
         {
-            "sn": "CP0Y8420004K",
+            "sn": "CV3T561000H0",
             "syncConfig": {
-                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_SECONDARY",
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
                 "depthDelayUs": 0,
                 "colorDelayUs": 0,
                 "trigger2ImageDelayUs": 0,
@@ -39,18 +39,45 @@
             },
             "streamConfig": {
                 "depth": {
-                    "width": 640,
-                    "height": 480,
+                    "width": 1280,
+                    "height": 800,
                     "fps": 30,
                     "format": "OB_FORMAT_Y16"
                 },
                 "color": {
-                    "width": 640,
-                    "height": 480,
+                    "width": 1280,
+                    "height": 800,
                     "fps": 30,
-                    "format": "OB_FORMAT_MJPG"
+                    "format": "OB_FORMAT_YUYV"
+                }
+            }
+        },
+         {
+            "sn": "CV3T561000B5",
+            "syncConfig": {
+                "syncMode": "OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING",
+                "depthDelayUs": 0,
+                "colorDelayUs": 0,
+                "trigger2ImageDelayUs": 0,
+                "triggerOutEnable": true,
+                "triggerOutDelayUs": 0,
+                "framesPerTrigger": 1
+            },
+            "streamConfig": {
+                "depth": {
+                    "width": 1280,   
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_Y16"
+                },
+                "color": {
+                    "width": 1280,
+                    "height": 800,
+                    "fps": 30,
+                    "format": "OB_FORMAT_YUYV"
                 }
             }
         }
+
     ]
 }

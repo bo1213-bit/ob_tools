@@ -112,7 +112,7 @@ void DataCollector::configureSyncMode() {
         OBMultiDeviceSyncConfig cfg = devices_[i]->getMultiDeviceSyncConfig();
         // All devices HARDWARE_TRIGGERING (external HW trigger signal)
         cfg.syncMode         = OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING;
-        cfg.triggerOutEnable = false;
+        cfg.triggerOutEnable = true;
         cfg.depthDelayUs         = 0;
         cfg.colorDelayUs         = 0;
         cfg.trigger2ImageDelayUs = 0;
@@ -144,13 +144,12 @@ void DataCollector::configureSyncMode() {
 
 void DataCollector::resetTimestampAndSyncClock() {
     // HARDWARE_TRIGGERING mode: trigger comes from external HW signal,
-    // no timestamp reset needed. Only do per-device clock sync with host.
+    // no timestamp reset needed. Only do device clock sync with host.
 
-    // Per-device one-shot clock sync (FAE recommended over enableDeviceClockSync)
-    for (auto &dev : devices_) {
-        dev->timerSyncWithHost();
-    }
-    std::cout << "Per-device timer sync completed (" << devices_.size() << " devices)" << std::endl;
+    // Sync device clocks (same as official multi-device-sync example)
+    std::cout << "Syncing device clocks..." << std::endl;
+    context_->enableDeviceClockSync(0);
+    std::cout << "Device clocks synced (" << devices_.size() << " devices)" << std::endl;
 
     // 使能全局时间戳(global timestamp)：仅对支持的设备开启。
     // 开启后 frame->globalTimeStampUs() 会返回换算到主机时钟域的时间戳，
