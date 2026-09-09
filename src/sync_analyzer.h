@@ -14,7 +14,8 @@
 class SyncAnalyzer {
 public:
     struct Config {
-        int64_t hwThresholdUs = 5000;  // 硬件时间戳配对阈值 (us)
+        int64_t globalThresholdUs = 5000;  // 后匹配"异常"判定阈值 (us): 组内 global 极差 >= 此值记为异常 (对应官方 --threshold)
+        double   fps           = 30.0;  // 帧率: 配对容差 matchTolUs = 1e6/fps/2 (与官方 half_gap_us 一致)
     };
 
     struct PairStats {
@@ -23,11 +24,17 @@ public:
         bool       isCrossStream;       // true=同设备跨流, false=跨设备同流
         int        pairCount;           // 成功配对帧数
 
-        // 硬件时间戳差统计 (us)
+        // 全局(跨设备时钟域)时间戳差统计 (us) —— 同步精度的正确度量
+        // (globalTimeStampUs 是换算到主机时钟域的时间戳; 官方 analyze_sync.py 默认 time base = global。
+        //  匹配与被度量都用 global, 前提是采集端按官方顺序完成时钟同步, 见 resetTimestampAndSyncClock)
+        int64_t    globalMinUs, globalMaxUs;
+        double     globalMeanUs, globalStddevUs;
+
+        // 设备端硬件时间戳差统计 (us) —— 仅参考 (timeStampUs, 设备本地时钟)
         int64_t    hwMinUs, hwMaxUs;
         double     hwMeanUs, hwStddevUs;
 
-        // 全局(软件)时间戳差统计 (us)
+        // 主机端系统时间戳差统计 (us)
         int64_t    sysMinUs, sysMaxUs;
         double     sysMeanUs, sysStddevUs;
     };
@@ -36,8 +43,10 @@ public:
         StreamType streamType;          // DEPTH 或 COLOR
         int        deviceCount;         // 参与匹配的设备数
         int        matchCount;          // 成功匹配组数
-        int64_t    hwMinUs, hwMaxUs;    // 每组 max(hw)-min(hw) 的最小/最大值
-        double     hwMeanUs, hwStddevUs;
+        int        abnormalCount;       // 组内极差 >= abnormalThresholdUs 的组数 (异常)
+        int64_t    abnormalThresholdUs; // 异常判定阈值 (us)
+        int64_t    globalMinUs, globalMaxUs;  // 每组 全局(global)时间戳极差 的最小/最大值 —— 同步精度的正确度量
+        double     globalMeanUs, globalStddevUs;
     };
 
     // 执行分析: 三类对比 + 多设备匹配 → 统计
@@ -61,16 +70,18 @@ public:
     void exportCSV(const std::string& path) const;
 
 private:
-    // 通用配对: 两组 FrameStamp → 匹配时间戳差 + 软件时间戳差 + 参考帧时间戳 + 硬件时间戳差 + 匹配索引
-    // matchDiffs: 匹配用的时间戳差值（useGlobalTimestamp=false 时同 hwDiffs，true 时同 globalDiffs）
-    // hwDiffs:   总是硬件时间戳差 (timeStampUs)
-    // matchedIdx: 每个匹配对中 a 的索引和 b 的索引
+    // 通用配对: 先按 globalTimestampUs 排序，再按官方前向游标规则一对一匹配。
+    // 已选中的 b 帧会被消费，不会复用于后续 a 帧。
+    // 返回 {hwDiffs, globalDiffs, sysDiffs, timestamps, aIndices, bIndices}:
+    //   globalDiffs: 全局时间戳差 globalTimeStampUs —— 同步精度的正确度量(匹配与被度量都用 global)
+    //   hwDiffs:     设备端时间戳差 timeStampUs —— 仅参考(设备本地时钟)
+    //   sysDiffs:    主机端时间戳差 systemTimeStampUs
+    //   timestamps:  参考帧主机时间戳; aIndices/bIndices: 匹配对在两组中的索引
     static std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<int64_t>, std::vector<size_t>, std::vector<size_t>>
     matchAndDiff(
         const std::vector<FrameStamp>& a,
         const std::vector<FrameStamp>& b,
-        int64_t hwThresholdUs,
-        bool useGlobalTimestamp = false
+        int64_t matchTolUs
     );
 
     // 根据 diff 向量计算 PairStats
@@ -78,20 +89,23 @@ private:
         int devI, int devJ,
         StreamType st, bool isCrossStream,
         const std::vector<int64_t>& hwDiffs,
+        const std::vector<int64_t>& globalDiffs,
         const std::vector<int64_t>& sysDiffs
     );
 
-    // 多设备匹配原始 diff: hw = max(hw)-min(hw) (参考), global = max(global)-min(global) (同步精度)
+    // 多设备匹配原始 diff: global = max(global)-min(global) (同步精度), hw = max(hw)-min(hw) (参考)
     struct MultiDeviceDiffs {
         std::vector<int64_t> hw;
         std::vector<int64_t> global;
     };
 
-    // 多设备最近邻唯一匹配: 所有设备同一流类型 → 每组 max-min
-    // 以帧数最少的设备为基准，每帧在其余设备中找最近且未匹配的帧
+    // 多设备最近邻匹配: 所有设备同一流类型 → 每组 max(global)-min(global) 作为同步精度
+    // 以指定基准设备(如 335Lg)为准，每帧在其余设备中找匹配容差内最近的帧(按全局 global 时间戳);
+    // refDevOverride<0 时退回帧数最少设备
     MultiDeviceDiffs multiDeviceMatch(
         const std::vector<std::vector<FrameStamp>>& allDevFrames,
-        int64_t hwThresholdUs
+        int64_t matchTolUs,
+        int refDevOverride = -1
     );
 
     // 打印单组统计
@@ -104,9 +118,11 @@ private:
     MultiDeviceStats       multiDeviceDepthStats_;  // 多设备同步 Depth
     MultiDeviceStats       multiDeviceColorStats_;  // 多设备同步 Color
 
-    // 多设备匹配原始 diff (用于 CSV): hw 参考 / global 同步精度
+    // 多设备匹配原始 diff (用于 CSV): global 同步精度 / hw 参考
     MultiDeviceDiffs       multiDeviceDepthDiffs_;
     MultiDeviceDiffs       multiDeviceColorDiffs_;
+
+    std::string            multiRefName_;        // 多设备匹配的基准设备名 (如 335Lg)
 
     // 原始 diff 数据 (用于 CSV 导出)
     struct DiffRecord {

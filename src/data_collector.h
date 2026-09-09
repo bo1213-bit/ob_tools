@@ -7,6 +7,7 @@
 #include <libobsensor/ObSensor.hpp>
 #include <opencv2/core.hpp>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <fstream>
 #include <memory>
@@ -69,6 +70,61 @@ private:
         uint64_t    deviceTimestampUs;
     };
 
+    // ---- 采集诊断 ----
+    // 只统计正式采集窗口的回调与帧序列，用于区分设备/SDK 出帧异常和主机回调积压。
+    // 不参与匹配逻辑，也不改变 raw CSV 的既有格式。
+    struct FrameEndpoint {
+        bool       valid = false;
+        FrameStamp stamp{};
+        int64_t    metadataFrameNumber = -1;
+        int64_t    callbackOffsetUs = 0;
+    };
+
+    struct StreamDiagnostics {
+        uint64_t acceptedFrames = 0;
+        uint64_t indexGapEvents = 0;
+        uint64_t missingIndexFrames = 0;
+        uint64_t indexRegressions = 0;
+        uint64_t metadataGapEvents = 0;
+        uint64_t missingMetadataFrames = 0;
+        uint64_t metadataRegressions = 0;
+        uint64_t hwTimestampRegressions = 0;
+        uint64_t globalTimestampRegressions = 0;
+        uint64_t systemTimestampRegressions = 0;
+        uint64_t hwCadenceGaps = 0;
+        uint64_t globalCadenceGaps = 0;
+        uint64_t systemCadenceGaps = 0;
+        uint64_t callbackCadenceGaps = 0;
+        bool       hasPrevious = false;
+        FrameStamp previous{};
+        int64_t    previousMetadataFrameNumber = -1;
+        int64_t    previousCallbackUs = 0;
+        FrameEndpoint first;
+        FrameEndpoint last;
+        bool       profileObserved = false;
+        uint32_t   observedWidth = 0;
+        uint32_t   observedHeight = 0;
+        int        observedFormat = 0;
+    };
+
+    struct DeviceDiagnostics {
+        uint64_t closedGateCallbacks = 0;
+        uint64_t openGateCallbacks = 0;
+        uint64_t completeFrameSets = 0;
+        uint64_t depthOnlyFrameSets = 0;
+        uint64_t colorOnlyFrameSets = 0;
+        uint64_t emptyFrameSets = 0;
+        uint64_t imageSaveSamples = 0;
+        int64_t  imageSaveTotalUs = 0;
+        int64_t  imageSaveMaxUs = 0;
+        StreamDiagnostics streams[2];
+    };
+
+    void recordFrameDiagnostics(int camIndex, int streamIndex, const FrameStamp& stamp,
+                                int64_t metadataFrameNumber, int64_t callbackUs,
+                                int64_t expectedPeriodUs);
+    void printDiagnosticsSummary(const Config& cfg, int64_t expectedPeriodUs) const;
+
     // 成员变量
     std::shared_ptr<ob::Context>                           context_;
     std::vector<std::shared_ptr<ob::Device>>               devices_;
@@ -77,6 +133,10 @@ private:
     std::vector<std::vector<std::shared_ptr<std::mutex>>>  mutexes_;       // [deviceIndex][streamType]
     // 最终结果: [deviceIndex][streamType][frameIndex]
     std::vector<std::vector<std::vector<FrameStamp>>>      allFrames_;
+    std::vector<DeviceDiagnostics>                         diagnostics_;
+    std::vector<std::shared_ptr<std::mutex>>                diagnosticMutexes_;
+    // 正式窗口开启前写入 steady_clock 微秒基准；0 表示当前回调不计入正式窗口诊断。
+    std::atomic<int64_t>                                   recordingArmSteadyUs_{0};
     // 采集运行标志，stop() 设为 false，collectFrames 中轮询检查
     std::atomic<bool>                                      running_{true};
 
@@ -86,8 +146,11 @@ private:
     std::mutex              csvMutex_;       // 保护 csvFile_ 与 globalSeq_
     std::vector<int>        savedCount_;     // [deviceIndex] 已保存的帧序号
     int                     globalSeq_ = 0;  // 全局帧序号 (作为 groupId)
-    std::atomic<bool>       savingEnabled_{true};    // 预热阶段临时置 false, color 帧只入内存不落盘; 预热完成后恢复 true
-    std::atomic<bool>       recordingEnabled_{true}; // 收尾冻结: false 时回调直接返回, 不再计数/落盘, 用于 stop 前冻结帧数
+    std::atomic<bool>       savingEnabled_{true};    // false 时 color 帧不入图像写盘队列
+    // 正式采集窗口 gate: pipeline 启动期间和收尾冻结期间均为 false。
+    // 自动触发时会短暂开启它只作 color 预热计数，随后清空这些预热帧；
+    // 正式窗口外的回调不会向最终 allFrames_ 或 timestamps.csv 写入帧。
+    std::atomic<bool>       recordingEnabled_{true};
 
     // ---- 后台写盘(慢 I/O 移出回调线程) ----
     std::queue<PendingImage> imageQueue_;         // 待落盘图片队列

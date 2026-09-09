@@ -31,8 +31,9 @@ DataCollector（采集）  →  SyncAnalyzer（分析）  →  输出报告 + CS
    - `triggerOutEnable = false`（不产生级联触发，由外部 PWM 统一驱动）
 
 3. **时钟对齐** `resetTimestampAndSyncClock()`
-   - 逐台 `timerSyncWithHost()`（设备与主机时钟一次性对齐）
-   - `enableGlobalTimestamp(true)`：把设备本地时间戳换算到主机时钟域，用于跨设备对齐
+   - 逐台 `enableGlobalTimestamp(true)`：把设备本地时间戳换算到主机时钟域
+   - `context_->enableDeviceClockSync(0)`：将设备时钟同步到主机时钟域
+   - 等待 1 秒让时钟同步稳定后再起流
 
 4. **采集帧** `collectFrames()`
    - 每个相机开一条 `ob::Pipeline`（Depth + Color 双流）
@@ -67,9 +68,9 @@ DataCollector（采集）  →  SyncAnalyzer（分析）  →  输出报告 + CS
 | 1. 同设备跨流 | 单台相机 Depth vs Color |
 | 2. 跨设备 Depth | 相机两两 Depth vs Depth（用 globalTimestampUs 匹配） |
 | 3. 跨设备 Color | 相机两两 Color vs Color（用 globalTimestampUs 匹配） |
-| 4. 多设备同步 | 所有相机同一流匹配后 `max(hw) - min(hw)` |
+| 4. 多设备同步 | 所有相机按 globalTimestampUs 匹配后 `max(global) - min(global)`（同步精度主指标） |
 
-每种对比输出统计量：`min / max / mean / stddev`（硬件时间戳差 + 系统时间戳差）。
+每种对比输出 `min / max / mean / stddev`；其中 global 时间戳差为同步精度主指标，硬件时间戳差仅作参考，系统时间戳差用于观察主机接收抖动。
 
 ---
 
@@ -133,7 +134,7 @@ sudo ./timestamp_sync_check \
 | `--width=N` | 分辨率宽 | 848 |
 | `--height=N` | 分辨率高 | 480 |
 | `--trigger-hz=N` | 自动控制外部 PWM 触发频率（0=关闭控制） | 0 |
-| `--hw-threshold=N` | 硬件时间戳配对阈值（us） | 500 |
+| `--global-threshold=N` | 匹配完成后以 global 时间戳极差判定异常的阈值（us） | 5000 |
 | `--no-depth` | 关闭深度流 | 关 |
 | `--no-color` | 关闭彩色流 | 关 |
 | `--outdir=PATH` | 保存彩色帧为 PNG + timestamps.csv | 不保存 |
