@@ -30,12 +30,31 @@ ob_tools/
 │   └── frame_stamp.h             # 单帧时间戳记录结构
 ├── docs/
 │   └── synchronization-flow.md   # 同步全流程与 Orbbec API 参考
-├── ob_official/                  # Orbbec 官方样例，用于行为对照
+├── ob_official/                  # Orbbec 官方多设备同步样例与参考资料
+├── OB ROS2/                       # 独立的 ROS2 相关工程
 ├── HANDOFF.md                    # 历史需求、约束和排查记录
 └── README.md
 ```
 
-仓库中可能还包含图像数据、CSV、图表和 Python 分析脚本。这些是实验数据或离线分析材料，**不属于构建 `timestamp_sync_check` 的必要输入**。
+### 2.1 获取完整仓库后的操作顺序
+
+请保留上述目录结构，并从仓库根目录开始使用：
+
+1. 先阅读本 README，确认硬件、SDK 与同步前提满足要求；
+2. 阅读 [同步配置、开流与全局时间戳匹配流程](docs/synchronization-flow.md)，了解硬件触发、全局时钟、335Lg 参考设备和结果判定规则；
+3. 如需运行本工具，只构建 `src/`：其 `src/CMakeLists.txt` 是 `timestamp_sync_check` 的独立 CMake 构建入口，后续按第 4 节的通用 CMake 命令构建；
+4. 需要比较本项目与 Orbbec 的实现、配置顺序或时间戳处理方式时，再查看 `ob_official/`；
+5. `OB ROS2/` 是独立 ROS2 工程，不参与 `timestamp_sync_check` 的构建；图像数据、CSV、图表和 Python 分析脚本属于实验数据或离线分析材料，也**不属于构建 `timestamp_sync_check` 的必要输入**。
+
+### 2.2 `ob_official/`：Orbbec 官方参考资料
+
+`ob_official/` 保存了 Orbbec 提供的多设备同步官方样例、对应的 SDK 资源以及分析脚本。它用于对照：
+
+- 设备 global timestamp 的启用与设备时钟同步顺序；
+- Pipeline 的开流和回调处理方式；
+- 帧配对、时间戳处理与结果分析逻辑。
+
+该目录不是 `src/CMakeLists.txt` 构建 `timestamp_sync_check` 的依赖，也不应直接替换本项目的实现。本项目仍以 `globalTimestampUs` 作为匹配和精度指标，并保留 335Lg/PID `2059` 的强制优先参考设备规则；具体实现约束以 [同步流程文档](docs/synchronization-flow.md) 为准。
 
 ---
 
