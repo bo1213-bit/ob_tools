@@ -1,0 +1,125 @@
+<launch>
+  <!--
+    Orbbec ROS1 multi-camera external hardware-trigger launch.
+
+    This launch mirrors the C++ synchronization flow in ../src:
+      1. all cameras use hardware_triggering
+      2. external trigger is controlled by /sys/kernel/debug/gpio_trigger/framerate
+      3. ROS image header.stamp is expected to use Orbbec global timestamp
+
+    Notes:
+      - Replace usb_port defaults with values from your machine.
+      - This folder is intentionally standalone. The helper scripts are started through
+        a ROS package name (`helper_pkg`) after you copy/symlink scripts into that package.
+      - If you only want camera launch here, set start_helper_nodes:=false and run
+        scripts/ob_trigger_controller.py + scripts/ros_timestamp_sync_analyzer.py manually.
+  -->
+
+  <arg name="camera1_name" default="camera_01"/>
+  <arg name="camera2_name" default="camera_02"/>
+  <arg name="camera1_usb_port" default="2-1"/>
+  <arg name="camera2_usb_port" default="2-2"/>
+
+  <arg name="width" default="1280"/>
+  <arg name="height" default="800"/>
+  <arg name="fps" default="30"/>
+
+  <arg name="orbbec_launch_file" default="$(find orbbec_camera)/launch/gemini_330_series.launch"/>
+  <arg name="config_file_path" default="$(find orbbec_camera)/config/camera_params.yaml"/>
+
+  <arg name="trigger_node" default="/sys/kernel/debug/gpio_trigger/framerate"/>
+  <arg name="trigger_hz" default="30"/>
+  <arg name="trigger_start_delay_sec" default="2.0"/>
+  <!-- Keep false by default: C++ stops camera pipelines before disabling trigger. -->
+  <arg name="stop_trigger_on_shutdown" default="false"/>
+
+  <arg name="output_dir" default="/tmp/ob_ros1_sync"/>
+  <arg name="match_threshold_us" default="5000"/>
+  <arg name="warmup_frames" default="3"/>
+  <arg name="duration_sec" default="0"/>
+
+  <arg name="start_helper_nodes" default="true"/>
+  <arg name="helper_pkg" default="ob_ros1_sync"/>
+
+  <!-- Camera 1: external hardware trigger input. -->
+  <include file="$(arg orbbec_launch_file)">
+    <arg name="camera_name" value="$(arg camera1_name)"/>
+    <arg name="usb_port" value="$(arg camera1_usb_port)"/>
+    <arg name="config_file_path" value="$(arg config_file_path)"/>
+
+    <arg name="sync_mode" value="hardware_triggering"/>
+    <arg name="trigger_out_enabled" value="false"/>
+    <arg name="frames_per_trigger" value="1"/>
+    <arg name="depth_delay_us" value="0"/>
+    <arg name="color_delay_us" value="0"/>
+    <arg name="trigger2image_delay_us" value="0"/>
+    <arg name="trigger_out_delay_us" value="0"/>
+
+    <arg name="enable_depth" value="true"/>
+    <arg name="enable_color" value="true"/>
+    <arg name="depth_width" value="$(arg width)"/>
+    <arg name="depth_height" value="$(arg height)"/>
+    <arg name="depth_fps" value="$(arg fps)"/>
+    <arg name="color_width" value="$(arg width)"/>
+    <arg name="color_height" value="$(arg height)"/>
+    <arg name="color_fps" value="$(arg fps)"/>
+
+    <arg name="time_domain" value="global"/>
+    <arg name="enable_sync_host_time" value="false"/>
+    <arg name="enable_frame_sync" value="true"/>
+    <arg name="frame_timestamp_csv_file" value="$(arg output_dir)/orbbec_camera_01_frame_timestamps.csv"/>
+  </include>
+
+  <!-- Camera 2: external hardware trigger input. -->
+  <include file="$(arg orbbec_launch_file)">
+    <arg name="camera_name" value="$(arg camera2_name)"/>
+    <arg name="usb_port" value="$(arg camera2_usb_port)"/>
+    <arg name="config_file_path" value="$(arg config_file_path)"/>
+
+    <arg name="sync_mode" value="hardware_triggering"/>
+    <arg name="trigger_out_enabled" value="false"/>
+    <arg name="frames_per_trigger" value="1"/>
+    <arg name="depth_delay_us" value="0"/>
+    <arg name="color_delay_us" value="0"/>
+    <arg name="trigger2image_delay_us" value="0"/>
+    <arg name="trigger_out_delay_us" value="0"/>
+
+    <arg name="enable_depth" value="true"/>
+    <arg name="enable_color" value="true"/>
+    <arg name="depth_width" value="$(arg width)"/>
+    <arg name="depth_height" value="$(arg height)"/>
+    <arg name="depth_fps" value="$(arg fps)"/>
+    <arg name="color_width" value="$(arg width)"/>
+    <arg name="color_height" value="$(arg height)"/>
+    <arg name="color_fps" value="$(arg fps)"/>
+
+    <arg name="time_domain" value="global"/>
+    <arg name="enable_sync_host_time" value="false"/>
+    <arg name="enable_frame_sync" value="true"/>
+    <arg name="frame_timestamp_csv_file" value="$(arg output_dir)/orbbec_camera_02_frame_timestamps.csv"/>
+  </include>
+
+  <!--
+    To add camera_03/camera_04, copy one include block above, change camera name,
+    usb_port, and frame_timestamp_csv_file.
+  -->
+
+  <group if="$(arg start_helper_nodes)">
+    <node pkg="$(arg helper_pkg)" type="ob_trigger_controller.py" name="ob_trigger_controller" output="screen">
+      <param name="trigger_node" value="$(arg trigger_node)"/>
+      <param name="trigger_hz" value="$(arg trigger_hz)"/>
+      <param name="start_delay_sec" value="$(arg trigger_start_delay_sec)"/>
+      <param name="stop_on_shutdown" value="$(arg stop_trigger_on_shutdown)"/>
+    </node>
+
+    <node pkg="$(arg helper_pkg)" type="ros_timestamp_sync_analyzer.py" name="ros_timestamp_sync_analyzer" output="screen">
+      <param name="camera_names" value="$(arg camera1_name),$(arg camera2_name)"/>
+      <param name="streams" value="color,depth"/>
+      <param name="match_threshold_us" value="$(arg match_threshold_us)"/>
+      <param name="warmup_frames" value="$(arg warmup_frames)"/>
+      <param name="output_dir" value="$(arg output_dir)"/>
+      <param name="duration_sec" value="$(arg duration_sec)"/>
+      <param name="analyze_on_shutdown" value="true"/>
+    </node>
+  </group>
+</launch>

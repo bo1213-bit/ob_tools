@@ -1,0 +1,9 @@
+sync_mode: hardware_triggering
+frames_per_trigger: 1
+trigger_out_enabled: false
+enable_point_cloud: false
+enable_sync_host_time: false
+time_domain: global
+enable_color: true
+enable_depth: true
+device_preset: Default

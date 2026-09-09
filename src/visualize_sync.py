@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-visualize_sync.py — HW timestamp sync precision histogram.
+visualize_sync.py — Global timestamp sync precision histogram.
 
 Generates a single three-in-one overview chart:
-  X-axis = sync precision time difference (|hw_diff_us|, absolute value)
+  X-axis = sync precision time difference (|global_diff_us|, absolute value)
   Y-axis = frequency (count per bin)
 
 Bin width and tick spacing both fixed at 50 us.
@@ -53,7 +53,7 @@ def read_csv(csv_path: str, max_diff_us: float = 20000.0) -> dict[str, list[floa
     skipped = 0
     with open(csv_path, 'r') as f:
         for row in csv.DictReader(f):
-            diff = float(row['hw_diff_us'])
+            diff = float(row['global_diff_us'])
             if abs(diff) > max_diff_us:
                 skipped += 1
                 continue
@@ -165,7 +165,7 @@ def plot_combined_overview(all_data: dict[str, list[float]],
         # ── Axis styling ──────────────────────────────────────────
         ax.set_title(label, fontsize=12, fontweight='bold',
                      color=TEXT_PRIMARY, pad=10)
-        ax.set_xlabel('|HW diff| (us)', fontsize=10, color=TEXT_PRIMARY)
+        ax.set_xlabel('|Global diff| (us)', fontsize=10, color=TEXT_PRIMARY)
         ax.set_ylabel('Frequency', fontsize=10, color=TEXT_PRIMARY)
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f'{v:,.0f}'))
 

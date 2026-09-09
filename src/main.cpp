@@ -31,7 +31,7 @@ static void printUsage(const char* prog) {
               << "  --width=N           Stream width (default: 848)\n"
               << "  --height=N          Stream height (default: 480)\n"
               << "  --trigger-hz=N      Auto-control external PWM trigger at N Hz (0=off, default: 0)\n"
-              << "  --hw-threshold=N    HW timestamp pairing threshold in us (default: 500)\n"
+              << "  --global-threshold=N Post-match global timestamp 'abnormal' threshold in us (default: 5000)\n"
               << "  --no-depth          Disable depth stream\n"
               << "  --no-color          Disable color stream\n"
               << "  --outdir=PATH       Save captured color frames as PNG + timestamps.csv to PATH\n"
@@ -79,7 +79,7 @@ int main(int argc, char* argv[]) {
             if (parseArg(arg, "--width=",         dcCfg.width))         continue;
             if (parseArg(arg, "--height=",        dcCfg.height))        continue;
             if (parseArg(arg, "--trigger-hz=",    dcCfg.triggerHz))     continue;
-            if (parseArg(arg, "--hw-threshold=",  saCfg.hwThresholdUs)) continue;
+            if (parseArg(arg, "--global-threshold=", saCfg.globalThresholdUs)) continue;
             if (parseArg(arg, "--outdir=",        dcCfg.outputDir))     continue;
             if (parseArg(arg, "--raw-csv=",       rawCsvPath))          continue;
             if (parseArg(arg, "--csv=",           csvPath))             continue;
@@ -94,6 +94,9 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
 
+        // 帧率同步给分析器: 配对容差 = 半帧间隔 (与官方 half_gap_us = 1e6/fps/2 一致)
+        saCfg.fps = static_cast<double>(dcCfg.fps);
+
         std::cout << "Configuration:" << std::endl;
         std::cout << "  resolution=" << dcCfg.width << "x" << dcCfg.height
                   << "  fps=" << dcCfg.fps
@@ -101,7 +104,8 @@ int main(int argc, char* argv[]) {
                   << "  depth=" << (dcCfg.useDepth ? "on" : "off")
                   << "  color=" << (dcCfg.useColor ? "on" : "off")
                   << "  trigger=" << dcCfg.triggerHz << "Hz" << std::endl;
-        std::cout << "  hw-threshold=" << saCfg.hwThresholdUs << "us"
+        std::cout << "  global-threshold=" << saCfg.globalThresholdUs << "us"
+                  << "  match-tol=" << static_cast<int64_t>(1000000.0 / saCfg.fps / 2.0) << "us (half-frame-interval)"
                   << "  csv=" << csvPath << std::endl;
         std::cout << "  outdir=" << (dcCfg.outputDir.empty() ? "(off)" : dcCfg.outputDir) << std::endl;
         std::cout << std::endl;

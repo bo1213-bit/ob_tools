@@ -1,0 +1,13 @@
+# 本地大文件/资料目录 —— 保留在本地，不纳入版本控制（避免 push 超过 GitHub 限制）
+资料/
+镜像/
+datasheet/
+
+# 系统镜像、固件、SDK 压缩包
+*.tgz
+*.tbz2
+*.tar
+*.tar.gz
+*.iso
+*.img
+*.bin
