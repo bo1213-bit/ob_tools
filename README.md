@@ -1,174 +1,239 @@
-# 多相机时间戳同步校验工具 (ob_tools)
+# 多相机时间戳同步校验工具（ob_tools）
 
-基于 OrbbecSDK 的多相机硬件触发时间戳同步校验程序。
+基于 Orbbec SDK 的多相机硬件触发时间戳同步校验程序。
 
 - **硬件**：3 台 Orbbec 相机（2× Gemini 305g + 1× Gemini 335Lg），GMSL2 / FAKRA 接口
-- **触发方式**：外部 PWM 硬件触发（`OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING`）
-- **核心目标**：验证三台相机在同一触发沿下，时间戳是否对齐
+- **触发模式**：`OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING`
+- **目标**：在同一外部触发沿下，使用全局时间戳评估多相机同步精度
+
+完整的同步配置、开流、采集、诊断和匹配说明见：[同步配置、开流与全局时间戳匹配流程](docs/synchronization-flow.md)。
 
 ---
 
-## 一、业务逻辑
+## 一、处理流程
 
-### 1.1 整体流程
+入口 `src/main.cpp` 按以下顺序运行：
 
-程序由两个模块编排而成，入口在 `main.cpp`：
-
-```
-DataCollector（采集）  →  SyncAnalyzer（分析）  →  输出报告 + CSV
+```text
+DataCollector（采集） → 可选 raw CSV 导出 → SyncAnalyzer（匹配与统计） → 报告与结果 CSV
 ```
 
-### 1.2 采集流程（`data_collector.cpp`）
+### 1. 设备配置与全局时钟
 
-`DataCollector::run()` 按以下顺序执行：
+`DataCollector::run()` 的主要步骤：
 
-1. **枚举设备** `enumerateDevices()`
-   - 列出所有相机（SN / 型号 / PID / VID / 固件）
-   - 检查是否支持全局时间戳（global timestamp）
+1. 枚举设备，输出 SN、型号、PID、固件及 global timestamp 支持情况；
+2. 写入硬件触发同步配置；
+3. 启用全局时间戳并同步设备时钟；
+4. 创建并启动各设备 Pipeline；
+5. 打开共享录制 gate，采集指定时长；
+6. 冻结录制、停止 Pipeline，最后才关闭自动触发；
+7. 对采集帧进行 global timestamp 匹配和统计。
 
-2. **配置硬件同步** `configureSyncMode()`
-   - 所有相机设为 `HARDWARE_TRIGGERING`（外部硬件触发）
-   - `triggerOutEnable = false`（不产生级联触发，由外部 PWM 统一驱动）
+硬件同步配置必须保持为：
 
-3. **时钟对齐** `resetTimestampAndSyncClock()`
-   - 逐台 `enableGlobalTimestamp(true)`：把设备本地时间戳换算到主机时钟域
-   - `context_->enableDeviceClockSync(0)`：将设备时钟同步到主机时钟域
-   - 等待 1 秒让时钟同步稳定后再起流
-
-4. **采集帧** `collectFrames()`
-   - 每个相机开一条 `ob::Pipeline`（Depth + Color 双流）
-   - **3 线程 + 主线程发令枪**：三台相机同时 `start()`
-   - 回调里记录每帧三类时间戳：
-     - `hwTimestampUs` — 设备端硬件时间戳
-     - `globalTimestampUs` — 换算到主机时钟域的全局时间戳
-     - `sysTimestampUs` — 主机端系统时间戳
-   - 采集固定时长后停止
-
-### 1.3 触发自动控制（关键改进）
-
-`--trigger-hz=N`（N > 0）时，程序**自动接管 PWM 触发开关**，解决"相机先后加入触发流导致帧数不均"的问题：
-
-```
-① 程序启动 → 写 0 关触发（清空旧触发流）
-② 枚举 / 配置 / 三台 start() 就绪（此时无触发，不出帧）
-③ 等待 300ms settle（确保相机进入可触发状态）
-④ 写 N 开触发 ← 发令枪，三台从同一触发沿开始出帧
-⑤ 采集 N 秒
-⑥ 停 pipeline → 写 0 关触发收尾
+```cpp
+cfg.syncMode             = OB_MULTI_DEVICE_SYNC_MODE_HARDWARE_TRIGGERING;
+cfg.triggerOutEnable     = true;
+cfg.depthDelayUs         = 0;
+cfg.colorDelayUs         = 0;
+cfg.trigger2ImageDelayUs = 0;
+cfg.triggerOutDelayUs    = 0;
+cfg.framesPerTrigger     = 1;
 ```
 
-> 为什么必须"先 arm、再触发"：硬件触发模式下，相机只在收到触发脉冲时才出帧。若 PWM 先于程序在跑，三台相机 `start()` 内部耗时不同、先后加入触发流，导致帧数错开、帧号无法一一对应。只有"三台先就绪、再统一放触发"，才能保证从同一触发沿开始、帧数严格相等。
+> `triggerOutEnable` 是当前硬件同步要求的一部分，必须保持 `true`，不要作为普通排障手段关闭。
 
-### 1.4 分析流程（`sync_analyzer.cpp`）
+所有支持 global timestamp 的设备必须按以下官方兼容顺序初始化：
 
-`SyncAnalyzer::run()` 做四类对比：
+```text
+enableGlobalTimestamp(true)（全部设备）
+→ Context::enableDeviceClockSync(0)
+→ 等待 1 秒稳定
+```
 
-| 对比类型 | 说明 |
-|---|---|
-| 1. 同设备跨流 | 单台相机 Depth vs Color |
-| 2. 跨设备 Depth | 相机两两 Depth vs Depth（用 globalTimestampUs 匹配） |
-| 3. 跨设备 Color | 相机两两 Color vs Color（用 globalTimestampUs 匹配） |
-| 4. 多设备同步 | 所有相机按 globalTimestampUs 匹配后 `max(global) - min(global)`（同步精度主指标） |
+335Lg 在当前部署中还必须在设备支持且可写时启用 `OB_PROP_FPS_BOOST_BOOL=true`；否则在 30 Hz 触发下可能只输出约一半帧率。程序会设置并读回该属性状态。
 
-每种对比输出 `min / max / mean / stddev`；其中 global 时间戳差为同步精度主指标，硬件时间戳差仅作参考，系统时间戳差用于观察主机接收抖动。
+### 2. 开流与采集窗口
+
+当前请求的流 profile 为：
+
+- Depth：`OB_STREAM_DEPTH`、`OB_FORMAT_Y16`
+- Color：`OB_STREAM_COLOR`、`OB_FORMAT_YUYV`
+- 默认配置：`1280x800 @ 30 fps`
+
+Pipeline 当前按设备枚举顺序确定性地依次 `start()`：
+
+```cpp
+for (int camIndex = 0; camIndex < deviceCount; ++camIndex) {
+    pipelines_[camIndex]->start(streamCfgs[camIndex], callback);
+}
+```
+
+这替代了此前的并发屏障启动方式，但它是用于验证“启动顺序是否影响残余 global 相位关系”的**受控实验**，不是已经证实的同步修复。进行板端对比时应只改变这一项，避免同时修改 profile、FPS boost、触发生命周期或匹配规则。
+
+Pipeline 启动过程中 `recordingEnabled_` 保持关闭，因此启动早期回调不会进入最终帧列表或 raw CSV。所有 Pipeline 启动完成后才打开共享正式采集窗口。
+
+当使用 `--trigger-hz=N`（`N > 0`）时，程序会：
+
+```text
+写 0 停止自动触发 → 启动全部 Pipeline → 等待约 300 ms → 写 N 启动触发
+```
+
+Color 流可进行预热，预热数据会在正式录制前清空。该 gate 控制的是回调是否接受，不能单独证明帧的曝光时刻；仍应结合帧序号、时间戳和诊断信息判断。
+
+安全停流顺序必须是：
+
+```text
+冻结 recording / saving gate
+→ 保持触发运行并停止全部 Pipeline
+→ 最后才写 0 关闭自动触发
+```
 
 ---
 
-## 二、执行指令
+## 二、时间戳匹配与同步精度
 
-### 2.1 部署（Windows → 远端 Linux）
+每帧保存的时间戳字段如下：
 
-在 Windows 的 PowerShell 里 `scp` 四个源文件到远端：
+| 字段 | SDK API | 用途 |
+|---|---|---|
+| `hwTimestampUs` | `frame->timeStampUs()` | 设备硬件时间戳，仅作诊断/对照 |
+| `globalTimestampUs` | `frame->globalTimeStampUs()` | **帧匹配与同步精度的主时间戳** |
+| `sysTimestampUs` | `frame->systemTimeStampUs()` | 主机接收和回调诊断 |
+| `frameNumber` | `frame->getIndex()` | 帧连续性诊断 |
+
+分析器按 `globalTimestampUs` 排序，使用约半帧周期的配对容差：
+
+```text
+matchTolUs = round(1,000,000 / fps / 2)
+```
+
+30 fps 时约为 `16667 us`。该容差只用于寻找候选帧，不等同于同步异常阈值。匹配采用前向游标：成功选中的帧会被消费，不会在后续分组中重复使用。
+
+### 强制 335Lg 参考设备
+
+多设备分组必须优先以 Gemini 335Lg 为参考设备：
+
+- 设备名称含 `335Lg` 或 `335`；或
+- PID 为 `2059`。
+
+只有未检测到有效的 335Lg 帧时，才退回到“有效设备中帧数最少者”为参考设备。
+
+完整多设备组的同步精度为：
+
+```text
+precisionUs = max(globalTimestampUs of group)
+            - min(globalTimestampUs of group)
+```
+
+`--global-threshold=N` 默认 `5000 us`。若：
+
+```text
+precisionUs >= globalThresholdUs
+```
+
+则该组计为异常。该阈值与 `matchTolUs` 相互独立。
+
+---
+
+## 三、构建与运行
+
+### 1. 部署到板端
+
+当前板端项目路径为 `~/ob_time`。在 Windows PowerShell 中复制源文件：
 
 ```powershell
-scp "D:\Data\robotPackage\ob_tools\src\main.cpp"             user@192.168.137.6:ros2_ws/src/main.cpp
-scp "D:\Data\robotPackage\ob_tools\src\data_collector.h"     user@192.168.137.6:ros2_ws/src/data_collector.h
-scp "D:\Data\robotPackage\ob_tools\src\data_collector.cpp"   user@192.168.137.6:ros2_ws/src/data_collector.cpp
-scp "D:\Data\robotPackage\ob_tools\src\sync_analyzer.h"      user@192.168.137.6:ros2_ws/src/sync_analyzer.h
-scp "D:\Data\robotPackage\ob_tools\src\sync_analyzer.cpp"    user@192.168.137.6:ros2_ws/src/sync_analyzer.cpp
-scp "D:\Data\robotPackage\ob_tools\src\frame_stamp.h"        user@192.168.137.6:ros2_ws/src/frame_stamp.h
-scp "D:\Data\robotPackage\ob_tools\src\CMakeLists.txt"       user@192.168.137.6:ros2_ws/src/CMakeLists.txt
+scp "D:\Data\robotPackage\ob_tools\src\main.cpp"           "mscape@192.168.137.2:/home/mscape/ob_time/main.cpp"
+scp "D:\Data\robotPackage\ob_tools\src\data_collector.h"   "mscape@192.168.137.2:/home/mscape/ob_time/data_collector.h"
+scp "D:\Data\robotPackage\ob_tools\src\data_collector.cpp" "mscape@192.168.137.2:/home/mscape/ob_time/data_collector.cpp"
+scp "D:\Data\robotPackage\ob_tools\src\sync_analyzer.h"    "mscape@192.168.137.2:/home/mscape/ob_time/sync_analyzer.h"
+scp "D:\Data\robotPackage\ob_tools\src\sync_analyzer.cpp"  "mscape@192.168.137.2:/home/mscape/ob_time/sync_analyzer.cpp"
+scp "D:\Data\robotPackage\ob_tools\src\frame_stamp.h"      "mscape@192.168.137.2:/home/mscape/ob_time/frame_stamp.h"
 ```
 
-### 2.2 编译
+如构建配置有变动，再复制 `CMakeLists.txt`。
+
+### 2. 编译
 
 ```bash
-ssh user@192.168.137.6
-cd ~/ros2_ws/src/build
-cmake .. && make
+ssh mscape@192.168.137.2
+cd ~/ob_time
+cmake --build build -j2
 ```
 
-看到 `Built target timestamp_sync_check` 且无 `error:` 即成功。
+出现 `Built target timestamp_sync_check` 即表示编译完成。
 
-### 2.3 运行（硬件触发自动控制，推荐）
+### 3. 运行
 
-必须用 `sudo`（写 `/sys/kernel/debug/gpio_trigger/framerate` 需要 root）：
+从 `~/ob_time` 目录运行 30 秒受控基线：
 
 ```bash
-sudo ./timestamp_sync_check \
-  --csv=./sync.csv \
-  --raw-csv=./raw.csv \
-  --duration=5 \
-  --width=1280 \
-  --height=800 \
-  --trigger-hz=10
+sudo ./build/timestamp_sync_check \
+  --duration=30 --fps=30 --width=1280 --height=800 \
+  --global-threshold=5000 \
+  --raw-csv=raw_30s.csv --csv=sync_result_30s.csv
 ```
 
-### 2.4 运行（不接管触发，纯采集）
-
-`--trigger-hz=0`（默认）时不碰 PWM，需手动控制触发：
+若当前目录已经是 `~/ob_time/build`，可执行文件应写为：
 
 ```bash
-./timestamp_sync_check --csv=./sync.csv --raw-csv=./raw.csv \
-  --duration=5 --width=1280 --height=800
+sudo ./timestamp_sync_check ...
 ```
+
+需要由程序自动管理外部 PWM 时，追加 `--trigger-hz=N`。写入 `/sys/kernel/debug/gpio_trigger/framerate` 通常需要 `sudo`。
 
 ---
 
-## 三、命令行参数
+## 四、命令行参数
 
-| 参数 | 说明 | 默认 |
-|---|---|---|
+| 参数 | 说明 | 默认值 |
+|---|---|---:|
 | `--duration=N` | 采集时长（秒） | 300 |
-| `--fps=N` | 流帧率 | 30 |
-| `--width=N` | 分辨率宽 | 848 |
-| `--height=N` | 分辨率高 | 480 |
-| `--trigger-hz=N` | 自动控制外部 PWM 触发频率（0=关闭控制） | 0 |
-| `--global-threshold=N` | 匹配完成后以 global 时间戳极差判定异常的阈值（us） | 5000 |
-| `--no-depth` | 关闭深度流 | 关 |
-| `--no-color` | 关闭彩色流 | 关 |
-| `--outdir=PATH` | 保存彩色帧为 PNG + timestamps.csv | 不保存 |
+| `--fps=N` | 请求流帧率 | 30 |
+| `--width=N` | 请求分辨率宽 | 1280 |
+| `--height=N` | 请求分辨率高 | 800 |
+| `--trigger-hz=N` | 自动控制外部 PWM；`0` 表示不接管 | 0 |
+| `--global-threshold=N` | 多设备组 global 极差异常阈值（us） | 5000 |
+| `--no-depth` | 不启用深度流 | 关闭 |
+| `--no-color` | 不启用彩色流 | 关闭 |
+| `--outdir=PATH` | 保存彩色 PNG 与图像时间戳 CSV | 不保存 |
 | `--raw-csv=PATH` | 导出原始帧时间戳 CSV | 不导出 |
-| `--csv=PATH` | 分析结果 CSV 路径（**必填**） | — |
-| `--help` | 帮助 | — |
+| `--csv=PATH` | 导出分析结果 CSV（必填） | — |
+| `--help` | 显示帮助 | — |
+
+> `main.cpp` 当前帮助文字仍显示旧的 `848x480` 默认值；实际采集默认值以 `DataCollector::Config` 的 `1280x800` 为准。
 
 ---
 
-## 四、输出说明
+## 五、输出与检查项
 
-- **`raw.csv`**（`--raw-csv`）：每帧原始时间戳
-  `deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs`
-- **`sync.csv`**（`--csv`）：四类对比的原始 diff
-  `comparison_type,device_i,device_j,stream,hw_diff_us,global_diff_us,sys_diff_us,timestamp_us`
+### CSV 格式
 
-### 验证结果怎么看
+`--raw-csv=PATH`：每一行是一帧原始记录。
 
-1. **帧数**：`--trigger-hz=10`、`--duration=5` 时，三台 Depth 应 ≈50 帧且彼此相等。
-2. **帧间隔**（验证触发频率）：
-
-```bash
-awk -F, '$1==0 && $2=="DEPTH" {print $4}' raw.csv
+```text
+deviceIndex,streamType,hwTimestampUs,globalTimestampUs,sysTimestampUs,frameNumber
 ```
 
-相邻值相减，应约等于 `1000000 / trigger-hz` us（10Hz → 100000us）。
+`--csv=PATH`：输出同设备跨流、跨设备同流和多设备分组的差值。
 
----
+```text
+comparison_type,device_i,device_j,stream,hw_diff_us,global_diff_us,sys_diff_us,timestamp_us
+```
 
-## 五、常见问题
+其中多设备行的 `global_diff_us` 是该组 `max(global)-min(global)`，而不是两设备间的有符号差。
 
-| 现象 | 原因 / 处理 |
-|---|---|
-| `[WARN] cannot open trigger node` | debugfs 未挂载或没加 `sudo` |
-| 写 0 之后相机仍出帧 | 0 不是"停触发"语义，需确认节点含义 |
-| 帧数不均 | 触发先于程序在跑；改用 `--trigger-hz` 自动控制 |
-| 帧率对不上（如 10Hz 出了 15Hz） | 检查 `cat /sys/kernel/debug/gpio_trigger/framerate`，确认单位是 Hz |
+### 板端基线检查
+
+每次运行至少确认：
+
+1. 设备 SN、型号、PID 与 global timestamp 支持状态正确；
+2. 335Lg 的 FPS boost 读回为启用；
+3. 读回同步配置为 hardware triggering、`triggerOut=1`、所有延迟为 0、`framesPerTrigger=1`；
+4. 日志顺序为先启用 global timestamp、再同步设备时钟、再等待 1 秒；
+5. 多设备报告的参考设备为 335Lg；
+6. FrameSet 完整性、帧号/metadata 连续性、时间戳倒退与 cadence gap 诊断；
+7. Depth 和 Color 的匹配组数、`max(global)-min(global)` 范围及 `>= 5000 us` 异常比例。
+
+残余 global 时间戳偏差需要使用同一参数进行重复受控测试判断；不要在一次测试里同时改变同步配置、启动策略、参考设备、FPS boost、流 profile 或触发生命周期。
