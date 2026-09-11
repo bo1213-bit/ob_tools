@@ -97,6 +97,25 @@ void DataCollector::enumerateDevices() {
         devices_.push_back(dev);
     }
 
+    const std::vector<std::string> officialOrder = {
+        "CPBG1630011D",
+        "CV3T561000H0",
+        "CV3T561000B5",
+    };
+    std::stable_sort(devices_.begin(), devices_.end(), [&](const auto& lhs, const auto& rhs) {
+        const std::string lhsSn = lhs->getDeviceInfo()->serialNumber();
+        const std::string rhsSn = rhs->getDeviceInfo()->serialNumber();
+        auto lhsIt = std::find(officialOrder.begin(), officialOrder.end(), lhsSn);
+        auto rhsIt = std::find(officialOrder.begin(), officialOrder.end(), rhsSn);
+        return lhsIt < rhsIt;
+    });
+
+    std::cout << "\nOfficial stream order:" << std::endl;
+    for (size_t i = 0; i < devices_.size(); ++i) {
+        std::cout << "  Device " << i << ": SN="
+                  << devices_[i]->getDeviceInfo()->serialNumber() << std::endl;
+    }
+
     if (devCount < 2) {
         throw std::runtime_error("Need at least 2 devices for sync check!");
     }
@@ -427,20 +446,14 @@ void DataCollector::printDiagnosticsSummary(const Config& cfg, int64_t expectedP
 }
 
 void DataCollector::collectFrames(const Config& cfg) {
-    int deviceCount = static_cast<int>(devices_.size());
-
-    // Pipeline start is asynchronous across devices. Keep every callback gated until
-    // all pipelines are running, otherwise earlier pipelines would contribute startup
-    // frames to the CSV while later pipelines are still opening their streams.
-    recordingEnabled_ = false;
-    savingEnabled_ = false;
+    const int deviceCount = static_cast<int>(devices_.size());
 
     pipelines_.resize(deviceCount);
     allFrames_.resize(deviceCount);
     mutexes_.resize(deviceCount);
     diagnostics_.assign(deviceCount, DeviceDiagnostics{});
     diagnosticMutexes_.resize(deviceCount);
-    recordingArmSteadyUs_ = 0;
+
     for (int i = 0; i < deviceCount; i++) {
         allFrames_[i].resize(2);
         mutexes_[i].resize(2);
@@ -462,142 +475,169 @@ void DataCollector::collectFrames(const Config& cfg) {
             std::cerr << "[WARN] cannot open timestamps.csv in " << outputDir_ << std::endl;
         }
         savedCount_.assign(deviceCount, 0);
-        // 启动后台写盘线程: 慢 I/O(imwrite/CSV flush) 移出回调线程, 避免阻塞 SDK 收帧导致丢帧
         writerRunning_ = true;
         writerThread_ = std::thread(&DataCollector::writerLoop, this);
         std::cout << "Image saving enabled -> " << outputDir_ << std::endl;
     }
 
     std::vector<std::shared_ptr<ob::Config>> streamCfgs(deviceCount);
-
     for (int i = 0; i < deviceCount; i++) {
         pipelines_[i] = std::make_shared<ob::Pipeline>(devices_[i]);
         auto streamCfg = std::make_shared<ob::Config>();
 
-        if (cfg.useDepth)
+        if (cfg.useDepth) {
             streamCfg->enableVideoStream(OB_STREAM_DEPTH,
                 static_cast<int>(cfg.width), static_cast<int>(cfg.height),
                 static_cast<int>(cfg.fps), OB_FORMAT_Y16);
-        if (cfg.useColor)
+        }
+        if (cfg.useColor) {
             streamCfg->enableVideoStream(OB_STREAM_COLOR,
                 static_cast<int>(cfg.width), static_cast<int>(cfg.height),
                 static_cast<int>(cfg.fps), OB_FORMAT_YUYV);
+        }
 
         streamCfgs[i] = streamCfg;
     }
 
-    // 外部触发自动控制: 先关触发, 确保三台相机从"无触发"状态一起 arm
+    const int64_t expectedPeriodUs = std::max<int64_t>(1, 1000000 / cfg.fps);
+    recordingEnabled_ = false;
+    savingEnabled_ = false;
+    recordingArmSteadyUs_ = 0;
+
+    std::vector<bool> readyDepth(deviceCount, !cfg.useDepth);
+    std::vector<bool> readyColor(deviceCount, !cfg.useColor);
+    std::mutex readyMutex;
+    std::condition_variable readyCv;
+    auto allDevicesReady = [&]() {
+        for (int i = 0; i < deviceCount; ++i) {
+            if (!readyDepth[i] || !readyColor[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    // 按官方样例的出流方式：不要在 start 前关闭触发。硬件触发模式下，
+    // pipeline->start() 期间就必须有 trigger，否则早启动的 pipeline 可能一直不回调。
     if (cfg.triggerHz > 0) {
-        writeTriggerFramerate(0);
+        writeTriggerFramerate(static_cast<int>(cfg.triggerHz));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
 
-    // ---- 阶段2: 按官方样例的确定顺序逐台 start ----
-    // 录制 gate 在整个启动阶段保持关闭。只改变开流顺序，不改变流配置、
-    // 回调逻辑、触发器生命周期或后续的共享录制窗口。
     for (int camIndex = 0; camIndex < deviceCount; ++camIndex) {
-        pipelines_[camIndex]->start(streamCfgs[camIndex],
-            [this, camIndex, cfg](std::shared_ptr<ob::FrameSet> frameSet) {
-                const bool gateOpen = recordingEnabled_.load();
-                const int64_t callbackUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
+        try {
+            pipelines_[camIndex]->start(streamCfgs[camIndex],
+                [this, camIndex, cfg, expectedPeriodUs,
+                 &readyDepth, &readyColor, &readyMutex, &readyCv](std::shared_ptr<ob::FrameSet> frameSet) {
+                    const int64_t callbackUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
 
-                if (!gateOpen) {
-                    std::lock_guard<std::mutex> lock(*diagnosticMutexes_[camIndex]);
-                    diagnostics_[camIndex].closedGateCallbacks++;
-                    return;
-                }
+                    auto colorFrame = frameSet ? frameSet->getFrame(OB_FRAME_COLOR) : nullptr;
+                    auto depthFrame = frameSet ? frameSet->getFrame(OB_FRAME_DEPTH) : nullptr;
 
-                auto colorFrame = frameSet ? frameSet->getFrame(OB_FRAME_COLOR) : nullptr;
-                auto depthFrame = frameSet ? frameSet->getFrame(OB_FRAME_DEPTH) : nullptr;
-                {
-                    std::lock_guard<std::mutex> lock(*diagnosticMutexes_[camIndex]);
-                    auto& diag = diagnostics_[camIndex];
-                    diag.openGateCallbacks++;
-                    if (depthFrame && colorFrame) {
-                        diag.completeFrameSets++;
-                    } else if (depthFrame) {
-                        diag.depthOnlyFrameSets++;
-                    } else if (colorFrame) {
-                        diag.colorOnlyFrameSets++;
-                    } else {
-                        diag.emptyFrameSets++;
+                    if (depthFrame || colorFrame) {
+                        {
+                            std::lock_guard<std::mutex> readyLock(readyMutex);
+                            if (depthFrame) readyDepth[camIndex] = true;
+                            if (colorFrame) readyColor[camIndex] = true;
+                        }
+                        readyCv.notify_all();
                     }
-                }
 
-                const int64_t armUs = recordingArmSteadyUs_.load();
-                const int64_t expectedPeriodUs = std::max<int64_t>(1, 1000000 / cfg.fps);
-                auto metadataFrameNumber = [](const std::shared_ptr<ob::Frame>& frame) {
-                    return frame->hasMetadata(OB_FRAME_METADATA_TYPE_FRAME_NUMBER)
-                               ? static_cast<int64_t>(frame->getMetadataValue(OB_FRAME_METADATA_TYPE_FRAME_NUMBER))
-                               : int64_t{-1};
-                };
-                auto observeProfile = [this, camIndex](int streamIndex,
-                                                       const std::shared_ptr<ob::Frame>& frame) {
-                    auto videoFrame = frame->as<const ob::VideoFrame>();
-                    if (!videoFrame) return;
-                    std::lock_guard<std::mutex> lock(*diagnosticMutexes_[camIndex]);
-                    auto& stream = diagnostics_[camIndex].streams[streamIndex];
-                    if (!stream.profileObserved) {
-                        stream.profileObserved = true;
-                        stream.observedWidth = videoFrame->getWidth();
-                        stream.observedHeight = videoFrame->getHeight();
-                        stream.observedFormat = static_cast<int>(videoFrame->getFormat());
-                    }
-                };
-
-                if (colorFrame) {
-                    FrameStamp fs;
-                    fs.hwTimestampUs     = colorFrame->timeStampUs();
-                    fs.globalTimestampUs = colorFrame->globalTimeStampUs();
-                    fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
-                    fs.frameNumber       = static_cast<int64_t>(colorFrame->getIndex());
-                    fs.deviceIndex       = camIndex;
-                    fs.streamType        = StreamType::COLOR;
-                    const int64_t metadataNumber = metadataFrameNumber(colorFrame);
-                    bool recorded = false;
+                    const bool gateOpen = recordingEnabled_.load();
                     {
-                        std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
-                        // Recheck under the stream lock so closing the gate before
-                        // a clear/stop cannot leave a late callback in allFrames_.
-                        if (recordingEnabled_.load()) {
-                            allFrames_[camIndex][1].push_back(fs);
-                            recorded = true;
+                        std::lock_guard<std::mutex> lock(*diagnosticMutexes_[camIndex]);
+                        auto& diag = diagnostics_[camIndex];
+                        if (gateOpen) {
+                            diag.openGateCallbacks++;
+                        } else {
+                            diag.closedGateCallbacks++;
+                        }
+                        if (depthFrame && colorFrame) {
+                            diag.completeFrameSets++;
+                        } else if (depthFrame) {
+                            diag.depthOnlyFrameSets++;
+                        } else if (colorFrame) {
+                            diag.colorOnlyFrameSets++;
+                        } else {
+                            diag.emptyFrameSets++;
                         }
                     }
-                    if (recorded && armUs != 0) {
+
+                    // start/warmup 阶段只用来确认 SDK 已经实际出帧；正式窗口开启后才写结果。
+                    if (!gateOpen) {
+                        return;
+                    }
+
+                    auto metadataFrameNumber = [](const std::shared_ptr<ob::Frame>& frame) {
+                        return frame->hasMetadata(OB_FRAME_METADATA_TYPE_FRAME_NUMBER)
+                                   ? static_cast<int64_t>(frame->getMetadataValue(OB_FRAME_METADATA_TYPE_FRAME_NUMBER))
+                                   : int64_t{-1};
+                    };
+                    auto observeProfile = [this, camIndex](int streamIndex,
+                                                           const std::shared_ptr<ob::Frame>& frame) {
+                        auto videoFrame = frame->as<const ob::VideoFrame>();
+                        if (!videoFrame) return;
+                        std::lock_guard<std::mutex> lock(*diagnosticMutexes_[camIndex]);
+                        auto& stream = diagnostics_[camIndex].streams[streamIndex];
+                        if (!stream.profileObserved) {
+                            stream.profileObserved = true;
+                            stream.observedWidth = videoFrame->getWidth();
+                            stream.observedHeight = videoFrame->getHeight();
+                            stream.observedFormat = static_cast<int>(videoFrame->getFormat());
+                        }
+                    };
+
+                    if (colorFrame) {
+                        FrameStamp fs;
+                        fs.hwTimestampUs     = colorFrame->timeStampUs();
+                        fs.globalTimestampUs = colorFrame->globalTimeStampUs();
+                        fs.sysTimestampUs    = colorFrame->systemTimeStampUs();
+                        fs.frameNumber       = static_cast<int64_t>(colorFrame->getIndex());
+                        fs.deviceIndex       = camIndex;
+                        fs.streamType        = StreamType::COLOR;
+                        const int64_t metadataNumber = metadataFrameNumber(colorFrame);
+                        {
+                            std::lock_guard<std::mutex> lock(*mutexes_[camIndex][1]);
+                            allFrames_[camIndex][1].push_back(fs);
+                        }
                         observeProfile(1, colorFrame);
                         recordFrameDiagnostics(camIndex, 1, fs, metadataNumber, callbackUs,
                                                expectedPeriodUs);
-                    }
-                    if (recorded && !outputDir_.empty()) {
-                        saveColorImage(colorFrame, camIndex);
-                    }
-                }
-
-                if (depthFrame) {
-                    FrameStamp fs;
-                    fs.hwTimestampUs     = depthFrame->timeStampUs();
-                    fs.globalTimestampUs = depthFrame->globalTimeStampUs();
-                    fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
-                    fs.frameNumber       = static_cast<int64_t>(depthFrame->getIndex());
-                    fs.deviceIndex       = camIndex;
-                    fs.streamType        = StreamType::DEPTH;
-                    const int64_t metadataNumber = metadataFrameNumber(depthFrame);
-                    bool recorded = false;
-                    {
-                        std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
-                        if (recordingEnabled_.load()) {
-                            allFrames_[camIndex][0].push_back(fs);
-                            recorded = true;
+                        if (!outputDir_.empty()) {
+                            saveColorImage(colorFrame, camIndex);
                         }
                     }
-                    if (recorded && armUs != 0) {
+
+                    if (depthFrame) {
+                        FrameStamp fs;
+                        fs.hwTimestampUs     = depthFrame->timeStampUs();
+                        fs.globalTimestampUs = depthFrame->globalTimeStampUs();
+                        fs.sysTimestampUs    = depthFrame->systemTimeStampUs();
+                        fs.frameNumber       = static_cast<int64_t>(depthFrame->getIndex());
+                        fs.deviceIndex       = camIndex;
+                        fs.streamType        = StreamType::DEPTH;
+                        const int64_t metadataNumber = metadataFrameNumber(depthFrame);
+                        {
+                            std::lock_guard<std::mutex> lock(*mutexes_[camIndex][0]);
+                            allFrames_[camIndex][0].push_back(fs);
+                        }
                         observeProfile(0, depthFrame);
                         recordFrameDiagnostics(camIndex, 0, fs, metadataNumber, callbackUs,
                                                expectedPeriodUs);
                     }
-                }
-            });
+                });
+        }
+        catch (ob::Error& e) {
+            auto sn = devices_[camIndex]->getDeviceInfo()->serialNumber();
+            std::cerr << "starting stream failed: " << sn << std::endl;
+            std::cerr << "function:" << e.getName()
+                      << "\nargs:" << e.getArgs()
+                      << "\nmessage:" << e.what()
+                      << "\nstatus:" << e.getStatus()
+                      << "\ntype:" << e.getExceptionType() << std::endl;
+            continue;
+        }
 
         auto sn = devices_[camIndex]->getDeviceInfo()->serialNumber();
         std::cout << "Device " << camIndex << " (SN=" << sn << ") pipeline started: "
@@ -607,76 +647,69 @@ void DataCollector::collectFrames(const Config& cfg) {
                   << std::endl;
     }
 
-    // All pipelines have now returned from start(). The callback gate remained closed
-    // throughout startup, so no device-specific opening frames reached allFrames_ or
-    // timestamps.csv. Keep the existing trigger order, then arm one shared window.
-    if (cfg.triggerHz > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        writeTriggerFramerate(static_cast<int>(cfg.triggerHz));
+    std::cout << "\n[WARMUP] Waiting until every device receives the requested stream(s)..." << std::endl;
+    bool ready = false;
+    {
+        std::unique_lock<std::mutex> readyLock(readyMutex);
+        const auto readyDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (running_ && !allDevicesReady()) {
+            if (readyCv.wait_until(readyLock, readyDeadline) == std::cv_status::timeout) {
+                break;
+            }
+        }
+        ready = allDevicesReady();
+
+        for (int i = 0; i < deviceCount; ++i) {
+            auto sn = devices_[i]->getDeviceInfo()->serialNumber();
+            std::cout << "  Device " << i << " (SN=" << sn << ") ready:"
+                      << " depth=" << (readyDepth[i] ? "yes" : "no")
+                      << " color=" << (readyColor[i] ? "yes" : "no") << std::endl;
+        }
     }
 
-    // Retain the existing color sensor warmup for auto-triggered runs, but do
-    // not let it become part of the measurement window or image CSV. The inner
-    // callback gate check makes the following clear safe against late callbacks.
-    if (cfg.useColor && cfg.triggerHz > 0) {
-        const int WARMUP_MIN_COLOR = 3;
-        const auto WARMUP_TIMEOUT = std::chrono::milliseconds(2000);
-        recordingEnabled_ = true;
+    if (!ready) {
+        std::cerr << "[WARN] Not all devices became ready before timeout; recording available streams anyway." << std::endl;
+    }
 
-        auto colorReady = [&]() {
-            for (int i = 0; i < deviceCount; ++i) {
-                std::lock_guard<std::mutex> lock(*mutexes_[i][1]);
-                if (static_cast<int>(allFrames_[i][1].size()) < WARMUP_MIN_COLOR) {
-                    return false;
-                }
-            }
-            return true;
-        };
-
-        const auto warmupStart = std::chrono::steady_clock::now();
-        while (!colorReady() &&
-               std::chrono::steady_clock::now() - warmupStart < WARMUP_TIMEOUT) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // 清空 start/warmup 阶段积累的数据和诊断，只保留正式采集窗口的数据。
+    for (int i = 0; i < deviceCount; ++i) {
+        for (int s = 0; s < 2; ++s) {
+            std::lock_guard<std::mutex> lock(*mutexes_[i][s]);
+            allFrames_[i][s].clear();
         }
-
-        recordingEnabled_ = false;
-        for (int i = 0; i < deviceCount; ++i) {
-            for (int stream = 0; stream < 2; ++stream) {
-                std::lock_guard<std::mutex> lock(*mutexes_[i][stream]);
-                allFrames_[i][stream].clear();
-            }
+        {
+            std::lock_guard<std::mutex> diagLock(*diagnosticMutexes_[i]);
+            diagnostics_[i] = DeviceDiagnostics{};
         }
-        std::cout << "[WARMUP] color ready (or timeout); warmup frames discarded" << std::endl;
+    }
+    if (!cfg.outputDir.empty()) {
+        std::lock_guard<std::mutex> csvLock(csvMutex_);
+        globalSeq_ = 0;
+        std::fill(savedCount_.begin(), savedCount_.end(), 0);
     }
 
     const auto recordingStart = std::chrono::steady_clock::now();
-    const auto recordingDeadline = recordingStart + std::chrono::seconds(cfg.durationSec);
     recordingArmSteadyUs_ = std::chrono::duration_cast<std::chrono::microseconds>(
         recordingStart.time_since_epoch()).count();
-    savingEnabled_ = true;
     recordingEnabled_ = true;
+    savingEnabled_ = true;
 
-    std::cout << "\n[RECORDING] Shared window armed for " << cfg.durationSec
-              << " seconds after all pipelines started." << std::endl;
+    std::cout << "\n[RECORDING] Formal recording window for " << cfg.durationSec
+              << " seconds." << std::endl;
     std::cout << "Collecting frames... (Ctrl+C to stop early)" << std::endl;
+
+    const auto recordingDeadline = recordingStart + std::chrono::seconds(cfg.durationSec);
     while (running_ && std::chrono::steady_clock::now() < recordingDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    // ---- 收尾: 先冻结计数, 再在触发仍开时逐台 stop, 最后关触发 ----
-    // 1) 冻结计数: recordingEnabled_=false 后回调直接丢弃新帧, 不再 push_back/落盘,
-    //    因此 stop 期间即使触发仍在跑、相机仍出帧, 帧数也不会漂移(对应原 104/101/98 问题)。
-    // 2) 触发仍开时 stop: 若先关触发再 stop, 收流通道等不到下一帧, 2.5s 超时后触发
-    //    tegra_camera 驱动的 use-after-free bug, 板子 panic 重启(见 pstore 日志)。
-    //    触发开着时 stop(), 收帧线程有帧可收, 能正常返回并发出 STREAMOFF, 通道干净关闭。
-    // 3) 全部 stop 完成(通道已关)后再关触发, 不会再出现饿死/超时。
     recordingEnabled_ = false;
     savingEnabled_ = false;
 
-    const int64_t expectedPeriodUs = std::max<int64_t>(1, 1000000 / cfg.fps);
     printDiagnosticsSummary(cfg, expectedPeriodUs);
 
     for (int i = deviceCount - 1; i >= 0; i--) {
+        if (!pipelines_[i]) continue;
         std::cout << "Stopping pipeline " << i << " ..." << std::endl;
         pipelines_[i]->stop();
         std::cout << "Pipeline " << i << " stopped" << std::endl;
@@ -687,7 +720,6 @@ void DataCollector::collectFrames(const Config& cfg) {
     }
 
     if (!outputDir_.empty()) {
-        // 停止后台写盘线程: 置停止标志 → 唤醒 → 等待队列清空并退出, 再关 CSV
         {
             std::lock_guard<std::mutex> lock(imageQueueMutex_);
             writerRunning_ = false;
